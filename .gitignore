@@ -1,1 +1,4 @@
 .env
+
+# Results — large .pt activation files and trajectory outputs
+results/
