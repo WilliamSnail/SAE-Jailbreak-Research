@@ -17,15 +17,21 @@ This XOR-like failure mode cannot be captured by any linear probe. It requires a
 
 ### 1.2 Positioning Against Prior Work
 
-| Dimension | The Assistant Axis (baseline) | This Thesis |
-|---|---|---|
-| **Representation space** | Dense activations projected onto a single axis | Sparse SAE latent activations across two circuit layers |
-| **What it detects** | General persona drift (model "feels less like an assistant") | Specific circuit failure: F_H active while F_R is suppressed |
-| **Detection architecture** | Linear probe / cosine similarity | Non-linear 2–3 layer MLP |
-| **Intervention** | Dense activation cap (always-on magnitude limiting) | Conditional Sparse Clamping (triggered only on circuit failure) |
-| **Capability cost** | MMLU degradation from constant intervention | Near-zero degradation: no steering on benign prompts |
+| Dimension | The Assistant Axis | Constitutional Classifiers++ (CC++) | This Thesis |
+|---|---|---|---|
+| **Representation space** | Dense activations projected onto a single axis | Linear probes on raw activations | Sparse SAE latent activations across two circuit layers |
+| **What it detects** | General persona drift | Token-level jailbreak signals (smoothed) | Specific circuit failure: F_H active while F_R is suppressed |
+| **Temporal modeling** | None (per-input) | SWiM/EMA on token-level probe outputs (single timescale) | **Two-level smoothing**: SWiM within-turn (token) + EMA across-turn (novel) |
+| **Detection architecture** | Linear probe / cosine similarity | Linear classifier ensemble | Non-linear 2–3 layer MLP on smoothed SAE features |
+| **Training loss** | Standard BCE | Softmax-weighted loss (emphasizes peak-harm tokens) | Softmax-weighted loss (adapted: emphasizes critical transition turns) |
+| **Intervention** | Dense activation cap (always-on) | Block before generation | Conditional Sparse Clamping (triggered only on circuit failure) |
+| **Capability cost** | MMLU degradation from constant intervention | Some over-refusal from ensemble voting | Near-zero degradation: no steering on benign prompts |
+| **Model** | Various | Claude-family (proprietary) | Gemma-3-IT (open-weight, reproducible) |
 
-**The thesis advances the field by:** explaining *how* multi-turn drift happens in sparse feature space (circuit breaking), and building a non-linear detector that catches the exact turn when the causal chain snaps.
+**The thesis advances the field by:**
+1. Explaining *how* multi-turn drift happens in sparse feature space (circuit breaking), and building a non-linear detector that catches the exact turn when the causal chain snaps.
+2. Extending CC++'s token-level temporal smoothing to a **two-level architecture** (within-turn SWiM + across-turn EMA) specifically designed for multi-turn jailbreak trajectories — a setting CC++ does not address.
+3. Operating in **sparse SAE feature space** rather than dense activations, enabling interpretable feature-level analysis of *which* safety circuits fail during a jailbreak.
 
 ---
 
@@ -278,7 +284,7 @@ The per-turn judge scores provide richer supervision than binary trajectory labe
 
 ---
 
-## 4. Phase 1 — Latent State Decomposition (Status: Working)
+## 4. Phase 1 — Latent State Decomposition (Status: Working — V-0.4 On-the-Fly)
 
 ### 4.1 Extraction Pipeline
 
@@ -296,7 +302,41 @@ Z_late_t  = sae_late.encode(h_late.squeeze(0).float())    # (seq_len, d_sae)
 
 **Aggregation over sequence:** Pool across the last N tokens of the model's response (the "decision region") rather than the full sequence. The final assistant token is most informative for refusal/compliance decisions.
 
-### 4.2 Feature Statistics Computed
+### 4.2 On-the-Fly Extraction Strategy (Inspired by CC++)
+
+**Rationale:** Constitutional Classifiers++ (Anthropic, 2026) warns that pre-saving activation data to disk "creates severe I/O bottlenecks" when moving probe data between HBM and RAM. We adopt an **on-the-fly recomputation** strategy: SAE activations are extracted inside the training/evaluation loop rather than pre-saved as `.pt` files.
+
+**Architecture:**
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│              On-the-Fly SAE Extraction                         │
+│                                                               │
+│  For each trajectory in training batch:                        │
+│    For each turn t:                                           │
+│      1. Reconstruct conversation history from saved JSON      │
+│      2. Forward pass through NNSight → extract hidden states  │
+│      3. Encode through SAEs → Z_early_t, Z_late_t             │
+│      4. Apply within-turn SWiM (M=16 tokens) aggregation      │
+│      5. Feed directly to MLP (no disk I/O)                    │
+│      6. Free GPU memory immediately after encoding            │
+│                                                               │
+│  Advantages:                                                  │
+│  • No 160GB+ disk footprint (100 traj × 8 turns × 200MB)     │
+│  • Enables data augmentation (random token masking, etc.)     │
+│  • Always uses latest SAE weights if fine-tuning              │
+│  • Matches CC++ recommended practice                          │
+│                                                               │
+│  Trade-off:                                                   │
+│  • Slower training (recompute vs. load) — acceptable at       │
+│    thesis scale (~800 data points)                            │
+│  • Requires GPU during training (model must be loaded)        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+**Note:** On-the-fly extraction is the default strategy from V-0.4 onwards. The pipeline no longer saves `.pt` activation files — trajectories are text-only JSON. Activations are recomputed at analysis time via `extract_activations_for_trajectory()`.
+
+### 4.3 Feature Statistics Computed
 
 Three complementary metrics (all implemented in `jailbreak_detection_pipeline.ipynb`):
 
@@ -308,7 +348,7 @@ Three complementary metrics (all implemented in `jailbreak_detection_pipeline.ip
 
 **Combined ranking score:** `normalize(freq_diff) + normalize(KL) + normalize(mean_diff)`
 
-### 4.3 Current Experimental Results (Gemma-3-1B-IT, 30 samples per class)
+### 4.4 Current Experimental Results (Gemma-3-1B-IT, 30 samples per class)
 
 Top discriminative latents by combined score:
 
@@ -380,20 +420,55 @@ Features whose interpretation misaligns are excluded from F_H / F_R sets.
 
 ## 6. Phase 3 — Causal Drift Detection: The Non-Linear MLP (Status: Not Started)
 
-### 6.1 Input Representation
+### 6.1 Input Representation: Two-Level Temporal Smoothing
 
-At each conversation turn `t`, construct the MLP input vector by concatenating the sparse activations of the *selected* features only:
+**Key insight from CC++ (Anthropic, 2026):** Raw SAE features are extremely sparse — a harm-related feature might fire as `[0, 0, 12.5, 0, 0, 8.2, 0, ...]` across tokens. Feeding raw spikes to an MLP produces noisy, unreliable predictions. CC++ solves this with Sliding Window Mean (SWiM) smoothing at token level. We extend this to a **two-level architecture** designed for multi-turn conversations:
+
+#### Level 1: Within-Turn Token Aggregation via SWiM (M=16)
+
+For each turn `t`, apply a sliding window mean over the response tokens to convert sparse per-token SAE activations into a continuous "concept intensity" signal:
 
 ```
-ψ_t = [A(F_H)_t  ⊕  A(F_R)_t]
+For each selected feature i in F_H ∪ F_R:
+    raw_tokens = [z_i^(1), z_i^(2), ..., z_i^(T)]     # per-token activations within turn t
+
+    swim_i^(k) = (1/M) * Σ_{j=0}^{M-1} z_i^(k-j)      # SWiM with M=16 tokens
+
+    A(f_i)_t = max_k(swim_i^(k))                        # take peak smoothed activation as turn-level summary
+```
+
+**Why M=16:** CC++ Figure 5b shows M=16 achieves the lowest ASR in their ablation. Responses are ~100–500 tokens, so M=16 provides local smoothing without washing out the signal. The max-pool over the smoothed sequence captures the peak "concept intensity" within the turn.
+
+**Alternative aggregation:** Mean-pool over `swim_i^(k)` instead of max-pool — compare in ablation (Section 8.3).
+
+#### Level 2: Across-Turn EMA Smoothing
+
+After obtaining turn-level feature summaries, apply Exponential Moving Average across conversation turns to track the multi-turn drift trajectory:
+
+```
+For each selected feature i:
+    Ā(f_i)_t = α * A(f_i)_t + (1 - α) * Ā(f_i)_{t-1}
+
+    where α ≈ 0.3 (retains ~3-turn memory for 5–10 turn conversations)
+    Initialize: Ā(f_i)_0 = A(f_i)_0
+```
+
+**Why α=0.3 (not CC++'s α=0.12):** CC++ uses α≈0.12 for token-level smoothing (~16-token memory). Our across-turn EMA operates on 5–10 turns, so α=0.3 (~3-turn memory) is more appropriate. α=0.12 would give ~16-turn memory — larger than the entire conversation.
+
+#### Constructing the MLP Input
+
+```
+ψ_t = [Ā(F_H)_t  ⊕  Ā(F_R)_t]
 ```
 
 Where:
-- `A(F_H)_t` = activation values of selected F_H features at the early layer (shape: `|F_H|`)
-- `A(F_R)_t` = activation values of selected F_R features at the late layer (shape: `|F_R|`)
+- `Ā(F_H)_t` = EMA-smoothed SWiM-aggregated activations of selected F_H features (shape: `|F_H|`)
+- `Ā(F_R)_t` = EMA-smoothed SWiM-aggregated activations of selected F_R features (shape: `|F_R|`)
 - `⊕` = concatenation
 
 If `|F_H| + |F_R| ≈ 50–200`, the MLP input is small — training is lightweight.
+
+**The two-level architecture is novel relative to CC++**, which only smooths at a single timescale (token-level). Our design explicitly models both intra-turn feature patterns and inter-turn drift dynamics.
 
 ### 6.2 MLP Architecture
 
@@ -410,9 +485,24 @@ Output: D_t  (scalar, Decoupling Probability ∈ [0,1])
 
 ### 6.3 Training
 
-**Loss:** Binary cross-entropy (or MSE for soft labels).
+#### Loss Function: Softmax-Weighted BCE (Inspired by CC++)
 
-**Label assignment — leveraging per-turn judge scores:**
+Standard BCE treats every turn equally. In a typical 8-turn Crescendo trajectory, turns 1–5 are benign (scores 0–2) while turns 6–8 contain the critical jailbreak transition. CC++ introduces **softmax-weighted loss** to force the detector to focus on the most informative tokens/turns. We adapt this to turn-level:
+
+```
+# Per-turn loss weights within a trajectory:
+w_t = exp(ȳ_t) / Σ_t' exp(ȳ_t')
+
+# Where ȳ_t is the smoothed MLP output (or judge score) for turn t
+# High-score turns get exponentially higher weight
+
+# Weighted trajectory loss:
+L_trajectory = Σ_t  w_t * BCE(D_t, y_t)
+```
+
+**Effect:** A turn scored 9 (clear jailbreak) gets ~100x more gradient weight than a turn scored 1 (benign). This prevents the MLP from converging to a trivial "always predict safe" solution, which would achieve low average loss on trajectories dominated by safe turns.
+
+#### Label Assignment — Leveraging Per-Turn Judge Scores
 
 The judge's 0–10 per-turn scores (Section 3.3) provide richer supervision than binary trajectory labels:
 
@@ -420,19 +510,38 @@ The judge's 0–10 per-turn scores (Section 3.3) provide richer supervision than
 - **Soft labels (preferred):** `y_t = judge_score_t / 10`. This gives the MLP a continuous gradient at *every* turn — the model learns that a turn scored 5 is "halfway to jailbroken," not just "safe." The escalation trajectory (e.g., scores `[0, 1, 2, 3, 5, 7, 9]`) directly supervises `D_t` to track the progression of the attack.
 - **Trajectory-level label:** The binary label (`max_score > 8`) is still used for final evaluation metrics (ASR, precision/recall), but training benefits from the continuous per-turn signal.
 
+#### Ablation: Loss Function Comparison
+
+| Loss | Description | Expected behavior |
+|---|---|---|
+| Standard BCE | Equal weight per turn | Biased toward "safe" prediction |
+| Soft-label MSE | `y_t = score/10`, equal weight | Better gradient signal, still turn-uniform |
+| **Softmax-weighted BCE** | Exponential weighting toward high-score turns | Best focus on critical transitions |
+
 **Alternative:** Train on the *difference vector* `A(F_H)_t - A(F_R)_t` to explicitly model the decoupling, then use the magnitude of this vector as a drift metric.
 
-### 6.4 EMA Smoothing
+### 6.4 Output Smoothing & Alarm Condition
 
-Apply Exponential Moving Average to `D_t` across turns to smooth out single-token noise:
+**Note:** The primary temporal smoothing now happens at the *input* level (Section 6.1: SWiM within-turn + EMA across-turn on SAE features). An additional optional EMA on the MLP *output* can provide extra stability:
 
 ```
-D_t_smooth = α * D_t + (1 - α) * D_{t-1}_smooth
+D_t_smooth = α_out * D_t + (1 - α_out) * D_{t-1}_smooth
 ```
 
-Recommended: `α = 0.3` (retains ~3-turn memory). Tune on validation set.
+Recommended: `α_out = 0.5` (light smoothing — most temporal modeling is already in the input). Tune on validation set.
 
 **Alarm condition:** `D_t_smooth > τ` for some threshold `τ` (tune for target FPR on XSTest).
+
+**Full smoothing pipeline summary (CC++-inspired two-level architecture):**
+
+```
+Raw SAE features (per-token, sparse)
+  → Level 1: SWiM (M=16 tokens) within each turn → turn-level feature summary
+  → Level 2: EMA (α=0.3) across turns → smoothed feature trajectory
+  → MLP → D_t (decoupling probability)
+  → (Optional) EMA (α_out=0.5) on D_t → D_t_smooth
+  → Alarm: D_t_smooth > τ
+```
 
 ### 6.5 Evaluation: Early Warning Latency
 
@@ -521,6 +630,19 @@ with model.trace(prompt_t):
 3. **Lasso features vs. composite score features:** Does Lasso selection outperform the current heuristic ranking?
 4. **Width sensitivity:** 16k vs. 65k vs. 262k SAE — does wider SAE improve feature quality?
 5. **Layer sensitivity:** Is the F_H / F_R layer assignment (early=7–13, late=17–22) optimal, or do different layer pairs perform better?
+6. **Temporal smoothing ablation (CC++-inspired, replicate Figure 5b style):** Compare detection performance across smoothing configurations. This is a key contribution — demonstrating that SAE feature sparsity is a real problem and temporal smoothing solves it.
+
+| Configuration | Within-Turn | Across-Turn | Expected result |
+|---|---|---|---|
+| Raw features (no smoothing) | None | None | Noisy, high false positive rate |
+| Mean-pool only | Mean over response tokens | None | Baseline aggregation, misses temporal patterns |
+| SWiM only | SWiM (M=16) + max-pool | None | Better within-turn, but no turn-level memory |
+| EMA only | Mean-pool | EMA (α=0.3) | Turn-level memory, but noisy per-turn input |
+| **Two-level (proposed)** | **SWiM (M=16) + max-pool** | **EMA (α=0.3)** | **Best: smooth input + temporal memory** |
+
+7. **SWiM window size sensitivity:** Compare M ∈ {4, 8, 16, 32} for within-turn aggregation (extending CC++ Figure 5b to our SAE setting).
+8. **Loss function ablation:** Standard BCE vs. soft-label MSE vs. softmax-weighted BCE — measure impact on Early Warning Latency and FPR.
+9. **Within-turn pooling:** Max-pool vs. mean-pool vs. last-token over the SWiM-smoothed sequence — which best captures the "decision region" of each response?
 
 ---
 
@@ -528,20 +650,22 @@ with model.trace(prompt_t):
 
 ### Immediate Next Steps — Dataset Generation (Prerequisite for all phases)
 
-- [ ] Fork/clone [AIM-Intelligence/Automated-Multi-Turn-Jailbreaks](https://github.com/AIM-Intelligence/Automated-Multi-Turn-Jailbreaks)
-- [ ] Implement `target_generate_with_activations()` — replace OpenAI target client with NNSight-wrapped Gemma-3-IT that extracts SAE activations per turn
-- [ ] Add score normalization layer: convert Crescendomation's inverted scale (1=success, 10=refusal) → our scale (0=refusal, 10=success)
-- [ ] Convert JBB-Behaviors 300 goals into Crescendomation test case JSONs (`to_json.py`)
-- [ ] Run Crescendomation pipeline with modified target on all 300 goals (`max_rounds=8`)
+- [x] Fork/clone [AIM-Intelligence/Automated-Multi-Turn-Jailbreaks](https://github.com/AIM-Intelligence/Automated-Multi-Turn-Jailbreaks)
+- [x] Implement `target_generate_with_activations()` — replace OpenAI target client with NNSight-wrapped Gemma-3-IT that extracts SAE activations per turn
+- [x] Add score normalization layer: convert Crescendomation's inverted scale (1=success, 10=refusal) → our scale (0=refusal, 10=success)
+- [x] Convert JBB-Behaviors 300 goals into Crescendomation test case JSONs (`to_json.py`)
+- [x] Run Crescendomation pipeline with modified target on all 300 goals (`max_rounds=8`)
 - [ ] Run additional tactics (Actor Attack, Opposite Day) on a subset for dataset diversity
-- [ ] Save extended trajectories with per-turn `(score, activations, was_backtracked)` to `data/trajectories.json`
-- [ ] Apply labeling: `max(normalized_score) > 8 → "jailbroken"`, else `"refused"`
+- [x] Save extended trajectories with per-turn `(score, activations, was_backtracked)` to `data/trajectories.json`
+- [x] Apply labeling: `max(normalized_score) > 8 → "jailbroken"`, else `"refused"`
 - [ ] Add WildChat benign trajectories and XSTest as negative samples
 - [ ] Validate inter-judge agreement: compare Crescendomation rubric judge vs. LlamaGuard-3-8B on a sample
 
 ### Phase 1 completion — Latent State Decomposition
 
-- [ ] Scale activation extraction to full trajectory dataset (per-turn extraction across all turns)
+- [x] Implement on-the-fly SAE extraction (`extract_activations_for_trajectory()`) — replays saved JSON through model (V-0.4)
+- [x] Remove pre-saved `.pt` activation files from pipeline — text-only trajectory JSON (V-0.4)
+- [ ] Run on-the-fly extraction across full 100-trajectory dataset (per-turn extraction across all turns) — build feature matrices for Phase 2
 - [ ] Add response-token pooling (aggregate over assistant response tokens only, not full sequence)
 - [ ] Implement saving of candidate latent results to `results/candidate_latents_layer_{N}.csv`
 - [ ] Run Gemma-3-1B-IT and Gemma-3-4B-IT side-by-side to check layer correspondence
@@ -553,25 +677,34 @@ with model.trace(prompt_t):
 - [ ] GPT-4o interpretation loop for top-ranked features
 - [ ] Save final F_H and F_R feature sets to JSON for use in downstream phases
 
-### Phase 3 — MLP Detector
+### Phase 3 — MLP Detector (CC++ Enhanced)
 
-- [ ] Implement trajectory-level data loader (sequence of ψ_t vectors per conversation)
+- [ ] Implement SWiM (M=16) within-turn token aggregation on selected SAE features
+- [ ] Implement EMA (α=0.3) across-turn smoothing on turn-level feature summaries
+- [ ] Build on-the-fly SAE extraction data loader (recompute activations in training loop, no pre-saved `.pt`)
+- [ ] Implement trajectory-level data loader (sequence of smoothed ψ_t vectors per conversation)
+- [ ] Implement softmax-weighted BCE loss function
 - [ ] Train MLP with soft labels from per-turn judge scores (`score_t / 10`)
 - [ ] Compare soft-label vs. hard-label training
-- [ ] Tune EMA α and threshold τ on validation set
+- [ ] Tune EMA α, SWiM M, and threshold τ on validation set
+- [ ] **CC++ ablation (Figure 5b style):** Raw vs. mean-pool vs. SWiM-only vs. EMA-only vs. two-level smoothing
+- [ ] **SWiM window ablation:** M ∈ {4, 8, 16, 32}
+- [ ] **Loss function ablation:** Standard BCE vs. soft-label MSE vs. softmax-weighted BCE
+- [ ] **Pooling ablation:** Max-pool vs. mean-pool vs. last-token over SWiM-smoothed sequence
 - [ ] Evaluate Early Warning Latency: compare MLP trigger turn vs. judge-score escalation turn
 
 ### Phase 4 — Intervention
 
 - [ ] Implement NNSight hook for conditional residual stream injection
+- [ ] Use EMA "Running Belief" state (from Phase 3 smoothing pipeline) as real-time trigger for conditional clamping
 - [ ] Run full evaluation suite (ASR, BRR, MMLU, GSM8K) for all baselines
 - [ ] Create intervention visualization: plot D_t_smooth across turns for example trajectories
 
 ### Phase 5 — Writing
 
-- [ ] Chapter 3: Methodology (formalise the framework from `Research_Method.md`)
-- [ ] Chapter 4: Experiments (dataset statistics, feature discovery results, MLP performance)
-- [ ] Chapter 5: Discussion (novelty claim vs. Assistant Axis, limitations, future work)
+- [ ] Chapter 3: Methodology (formalise the framework, cite CC++ for SWiM/EMA inspiration, explain two-level extension)
+- [ ] Chapter 4: Experiments (dataset statistics, feature discovery results, MLP performance, CC++ ablation plots)
+- [ ] Chapter 5: Discussion (novelty claim vs. Assistant Axis and CC++, limitations, future work)
 
 ---
 
@@ -588,3 +721,8 @@ with model.trace(prompt_t):
 | Intervention style | Add-only over subtract | Prevents over-clamping; restores F_R to natural refusal level |
 | Judge model | Crescendomation rubric judge (primary) + LlamaGuard-3-8B (validation) | Dynamic rubric adapts per-goal; LlamaGuard cross-validates for consistency |
 | Control dataset | XSTest | Tests for over-refusal specifically on sensitive-but-legal prompts |
+| Within-turn smoothing | SWiM (M=16 tokens) | CC++ ablation (Fig 5b) shows M=16 is optimal; converts sparse SAE spikes to continuous concept signals |
+| Across-turn smoothing | EMA (α=0.3) | Adapted from CC++ (α≈0.12 for tokens → α=0.3 for turns); provides ~3-turn memory appropriate for 5–10 turn conversations |
+| Training loss | Softmax-weighted BCE | CC++ insight: standard loss under-weights critical transition turns; softmax weighting focuses gradient on high-score turns where jailbreak occurs |
+| Activation extraction | On-the-fly recomputation (Phase 3+) | CC++ warns against I/O bottlenecks from pre-saved activations; on-the-fly enables augmentation and avoids 160GB+ disk footprint |
+| Two-level smoothing | SWiM (token) + EMA (turn) | Novel extension of CC++ single-level approach; explicitly models both intra-turn patterns and inter-turn drift — CC++ does not address multi-turn |
