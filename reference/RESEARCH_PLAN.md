@@ -679,7 +679,7 @@ with model.trace(prompt_t):
 
 ### Phase 3 — MLP Detector (CC++ Enhanced)
 
-- [ ] Implement SWiM (M=16) within-turn token aggregation on selected SAE features
+- [x] Implement SWiM (M=16) within-turn token aggregation on selected SAE features (V-0.7: `swim_aggregate()`, `extract_sae_activations_swim()`, `iter_trajectory_activations_swim()`)
 - [ ] Implement EMA (α=0.3) across-turn smoothing on turn-level feature summaries
 - [ ] Build on-the-fly SAE extraction data loader (recompute activations in training loop, no pre-saved `.pt`)
 - [ ] Implement trajectory-level data loader (sequence of smoothed ψ_t vectors per conversation)

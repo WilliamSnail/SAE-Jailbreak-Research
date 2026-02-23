@@ -6,9 +6,9 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
 
 ---
 
-## Current Status: Phase 1 — Pipeline Complete (V-0.6)
+## Current Status: Phase 1 — Pipeline Complete (V-0.7)
 
-**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.6.ipynb`
+**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.7.ipynb`
 
 ### What Has Been Built
 
@@ -48,6 +48,20 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
 - Score trajectory plots: per-conversation score evolution + max score distribution
 - SAE activation statistics: mean magnitude, firing rate, max activation per layer per turn (on-the-fly)
 - SAE activation evolution plot: mean |activation| vs judge score across turns per layer (on-the-fly)
+
+#### 10. SWiM-Aggregated SAE Extraction (V-0.7 — CC++ Level 1)
+- **SWiM (Sliding Window Mean)**: Converts sparse per-token SAE activations into smooth turn-level summaries
+- **Algorithm**: Slide a 16-token window along the sequence dimension (`avg_pool1d`, stride=1), then max-pool across positions → `(d_sae,)` per layer per turn
+- **Why needed**: Raw SAE features are extremely sparse — a harm feature firing on 2 tokens out of 500 gets diluted to near-zero by averaging. SWiM preserves local bursts by only averaging within a 16-token neighborhood, then taking the peak.
+- **Functions implemented**:
+  - `swim_aggregate()` — core SWiM: avg_pool1d + max/mean pool
+  - `extract_sae_activations_swim()` — wraps existing NNSight trace + SAE encode + SWiM
+  - `iter_trajectory_activations_swim()` — memory-safe generator yielding `(d_sae,)` per turn (~260KB vs ~200MB+ for raw)
+  - `extract_trajectory_swim()` — accumulates all turns safely (memory-safe due to compact SWiM output)
+- **Hyperparameters**: `SWIM_WINDOW_SIZE=16` (CC++ Figure 5b optimal), `SWIM_POOL_MODE="max"` (peak concept intensity)
+- **Performance**: Negligible overhead vs raw extraction (same NNSight trace + SAE encode bottleneck; SWiM adds only avg_pool1d + max)
+- **Top-K Feature Tracking**: Visualization cell tracks top-20 SAE latent indices per layer across turns, categorizing features as persistent (F_H candidates), disappeared (F_R candidates), emerged, or high-score-only
+- **This is Level 1 of the two-level smoothing pipeline** (Level 2: EMA across-turn = Phase 3)
 
 #### 6. JBB Category & Behavior Analysis (V-0.3+)
 - **Category/Behavior stored in trajectories**: Pipeline saves `category` and `behavior` fields from JBB-Behaviors
@@ -110,7 +124,7 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 
 ---
 
-## Notebook Cell Map (V-0.6)
+## Notebook Cell Map (V-0.7)
 
 | Cell | Section | Description |
 |---|---|---|
@@ -141,10 +155,25 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 | 40 | 11. On-the-Fly | `iter_trajectory_activations()` generator + `extract_activations_for_trajectory()` |
 | 41 | 11. Analysis | On-the-fly SAE activation statistics (memory-safe) |
 | 42 | 11. Analysis | On-the-fly SAE activation evolution plot |
+| 43 | 11. SWiM | Markdown: SWiM algorithm explanation + two-level pipeline overview |
+| 44 | 11. SWiM | `swim_aggregate()` + `extract_sae_activations_swim()` — SWiM functions |
+| 45 | 11. SWiM | `iter_trajectory_activations_swim()` + `extract_trajectory_swim()` — trajectory generators |
+| 46 | 11. SWiM | Performance comparison: Raw vs SWiM (timing + memory benchmark) |
+| 47 | 11. SWiM | Top-K SAE feature tracking across turns (heatmap + feature dynamics summary) |
 
 ---
 
 ## Version History
+
+### V-0.7 (2026-02-24) — SWiM-Aggregated SAE Extraction
+- **Added** `swim_aggregate()` — SWiM smoothing via `avg_pool1d(M=16, stride=1)` + max/mean pool → `(d_sae,)` turn-level summary
+- **Added** `extract_sae_activations_swim()` — wraps existing NNSight trace + SAE encode with SWiM on top
+- **Added** `iter_trajectory_activations_swim()` — memory-safe generator yielding compact `(d_sae,)` per turn (~260KB vs ~200MB+)
+- **Added** `extract_trajectory_swim()` — accumulates all turns (safe due to compact output)
+- **Added** Performance benchmark cell: Raw vs SWiM timing + memory comparison table
+- **Added** Top-K SAE feature tracking visualization: heatmap of top-20 features per layer across turns, feature dynamics summary (persistent/emerged/disappeared/high-score-only), F_H/F_R candidate flagging
+- **Added** `SWIM_WINDOW_SIZE=16`, `SWIM_POOL_MODE="max"` hyperparameters
+- **Implements** Level 1 of the CC++-inspired two-level temporal smoothing pipeline (within-turn SWiM)
 
 ### V-0.6 (2026-02-23) — Enhanced Trajectory Data & Criteria Caching
 - **Added** criteria cache (`criteria_cache.json`) — reuses generated rubrics across runs, auto-seeded from loaded trajectories
@@ -230,7 +259,7 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 - [ ] Validate with GPT-4o feature interpretation + Neuronpedia dashboards
 
 ### Phase 3 — MLP Detector (CC++ Enhanced)
-- [ ] Implement SWiM (M=16) within-turn token aggregation on selected SAE features
+- [x] Implement SWiM (M=16) within-turn token aggregation on selected SAE features (done V-0.7)
 - [ ] Implement EMA (α=0.3) across-turn smoothing on turn-level feature summaries
 - [ ] Build on-the-fly SAE extraction data loader for training loop
 - [ ] Implement softmax-weighted BCE loss function
@@ -250,7 +279,8 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 
 ```
 SAE-Jailbreak-Research/
-  cross_layer_causal_sae_jailbreak_detection_V-0.6.ipynb  # Active notebook
+  cross_layer_causal_sae_jailbreak_detection_V-0.7.ipynb  # Active notebook
+  cross_layer_causal_sae_jailbreak_detection_V-0.6.ipynb  # Previous (criteria caching)
   cross_layer_causal_sae_jailbreak_detection_V-0.5.ipynb  # Previous (section reorg)
   cross_layer_causal_sae_jailbreak_detection_V-0.4.ipynb  # Previous (on-the-fly extraction)
   cross_layer_causal_sae_jailbreak_detection_V-0.3.ipynb  # Previous (category analysis)
@@ -274,4 +304,4 @@ SAE-Jailbreak-Research/
 
 ---
 
-*Last updated: 2026-02-23*
+*Last updated: 2026-02-24*
