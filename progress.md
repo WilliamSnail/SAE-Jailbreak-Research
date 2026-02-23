@@ -6,9 +6,9 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
 
 ---
 
-## Current Status: Phase 1 — Pipeline Complete (V-0.4)
+## Current Status: Phase 1 — Pipeline Complete (V-0.6)
 
-**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.4.ipynb`
+**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.6.ipynb`
 
 ### What Has Been Built
 
@@ -19,11 +19,11 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
 - **Refusal Detection**: GPT-4o checks if the target refused, with backtracking support (up to 10 backtracks)
 - **Scoring Rubric**: Auto-generated per-goal by GPT-4o using Crescendomation's rubric generation prompt
 - **Test Cases**: Loaded from JailbreakBench/JBB-Behaviors (100 harmful behaviors, configurable subset)
-- **Pipeline function**: `run_crescendomation()` — text-only, no activation extraction during attack (V-0.4)
+- **Pipeline function**: `run_crescendomation()` — text-only, no activation extraction during attack
 
 #### 2. On-the-Fly SAE Activation Extraction (V-0.4 — CC++ Inspired)
 - **Key change from V-0.3**: SAE activations are **no longer saved to disk** as `.pt` files
-- **New approach**: `extract_activations_for_trajectory()` replays saved JSON trajectories through the model and extracts SAE activations on-the-fly at analysis time
+- **New approach**: `iter_trajectory_activations()` generator replays saved JSON trajectories through the model and extracts SAE activations on-the-fly at analysis time, one turn at a time (memory-safe)
 - **Motivation**: Following Constitutional Classifiers++ (Anthropic, 2026) recommendation against pre-saving activation data to avoid I/O bottlenecks
 - **SAEs**: GemmaScope 2 JumpReLU SAEs (`gemma-scope-2-4b-it-res`, `width=65k`, `l0=medium`)
 - **Layers**: [9, 17, 22, 29] — Early (F_H: 9, 17) and Late (F_R: 22, 29)
@@ -32,7 +32,7 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
   - Eliminates ~160GB+ disk footprint (100 traj × 8 turns × 200MB)
   - Enables flexible layer/SAE selection at analysis time
   - Enables data augmentation for Phase 3 MLP training
-  - Memory freed immediately after each trajectory (`del act_data` + `torch.cuda.empty_cache()`)
+  - Memory freed immediately after each turn (`del acts` + `torch.cuda.empty_cache()`)
 
 #### 3. Trajectory Storage (Text-Only JSON)
 - Trajectory metadata (goals, prompts, responses, scores, categories) saved as timestamped JSON files
@@ -59,6 +59,7 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
 #### 7. Trajectory Viewer Tool (`test/trajectory_viewer.ipynb`)
 - Standalone interactive notebook for browsing saved trajectories (no model loading needed)
 - Category filter dropdown, turn selector, "Show All Turns" button, category summary table
+- **V-0.6**: Now displays **scoring criteria** (collapsible) and **refusal judge** details per turn
 
 #### 8. CC++ Integration into Research Plan (V-0.4)
 - **RESEARCH_PLAN.md** updated with Constitutional Classifiers++ (Anthropic, 2026) integration:
@@ -70,6 +71,13 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
   - Section 8.3: 4 new ablation studies (temporal smoothing, SWiM M, loss function, pooling)
   - Section 9: Phase 3 roadmap expanded with CC++ tasks
   - Section 10: 5 new design decision rows
+
+#### 9. Enhanced Trajectory Data & Criteria Caching (V-0.6)
+- **Criteria cache**: Disk-backed JSON cache (`criteria_cache.json`) keyed by goal string. On first run, `generate_score_rubric()` calls GPT-4o and saves the result. On re-runs with the same goal, the cached criteria is reused instantly (no API call). Cache is auto-seeded from loaded trajectories.
+- **Refusal judge dict saved per turn**: `check_refusal()` now returns the full dict `{value, rationale, metadata, refused}` instead of just a bool. Every turn record (both backtracked and non-backtracked) includes a `refusal_judge` field with the judge's reasoning and confidence score.
+- **Score judge dict saved per turn**: `evaluate_with_rubric()` now returns the full dict `{rationale, Score, metadata}` instead of just an int. Every non-backtracked turn record includes a `score_judge` field with the judge's reasoning and confidence. Backtracked turns have `score_judge: null` (not scored).
+- **Explicit confidence definition**: Both `CHECK_REFUSAL_SYSTEM_PROMPT` and `evaluate_with_rubric()` prompt updated to explicitly define `metadata` as a confidence score (0-100), rather than leaving the judge to infer from examples alone.
+- **Trajectory viewer updated**: Displays scoring criteria (collapsible `<details>`) in trajectory header, refusal judge details, and score judge details (rationale, confidence) per turn. HTML-escaped for safe display. Gracefully handles older trajectories without these fields.
 
 ---
 
@@ -102,44 +110,63 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 
 ---
 
-## Notebook Cell Map (V-0.4)
+## Notebook Cell Map (V-0.6)
 
 | Cell | Section | Description |
 |---|---|---|
 | 0 | Header | Markdown: architecture overview, CC++ design decision, references |
+| 1 | Next Step | Markdown: check Promptfoo for correct prompt |
 | 3-5 | 1. Setup | Environment detection, imports, API config |
-| 7 | 2. Config | Model, SAE, Crescendomation parameters (NUM_TEST_CASES=100) |
+| 7 | 2. Config | Model, SAE, Crescendomation parameters, criteria cache path |
 | 9 | 3. Load Model | Gemma-3-4B-IT via NNSight with SDPA attention |
-| 10 | 3. Load SAEs | GemmaScope 2 SAEs for layers [9, 17, 22, 29] |
-| 12 | 4. Attacker/Judge | OpenAI API client + `attacker_generate()` |
-| 14-17 | 5. Utils | Rubric generation, evaluation, refusal check, Crescendo step |
-| 19 | 6. Target Gen | `target_generate()` + `extract_sae_activations_for_turn()` (separate functions) |
-| 21 | 7. Load JBB | Load JailbreakBench/JBB-Behaviors dataset |
-| 22 | 7. Test Cases | Convert to Crescendomation format with category/behavior fields |
-| 24 | 8. Pipeline | `run_crescendomation()` — text-only, no activation extraction |
-| 26 | 8. Runner | Iterates test cases |
-| 28 | 9. Save | Save trajectory JSON (text-only, no activation file references) |
-| 29 | 9. Load | Auto-detect and reload latest saved trajectories |
-| 30 | 9. On-the-Fly | `extract_activations_for_trajectory()` — replay + extract at analysis time |
-| 32 | 10. Results | Overall summary table |
-| 33 | 10. Results | Category/behavior analysis tables (with JBB lookup recovery) |
-| 34 | 10. Results | Category visualization plots (ASR bar, stacked, avg score) |
-| 35 | 10. Results | Score trajectory plots |
-| 36 | 10. Results | Detailed turn-by-turn logs |
-| 37-38 | 11. Analysis | On-the-fly SAE activation statistics (extract, compute, free per-trajectory) |
-| 39 | 11. Analysis | On-the-fly SAE activation evolution plot |
+| 11 | 4. Attacker/Judge | OpenAI API client + `attacker_generate()` |
+| 13 | 5. Rubric | `generate_score_rubric()` with disk-backed criteria cache |
+| 14 | 5. Evaluate | `evaluate_with_rubric()` + `normalize_score()` |
+| 15 | 5. Refusal | `check_refusal()` — returns full dict {value, rationale, metadata, refused} |
+| 16 | 5. Attacker | `generate_crescendo_step()` — Crescendo strategy prompt |
+| 18 | 6. Target Gen | `target_generate()` — NNSight generation |
+| 20-21 | 7. Load JBB | Load JailbreakBench/JBB-Behaviors + convert to test cases |
+| 23 | 8. Pipeline | `run_crescendomation()` — saves criteria, refusal_judge per turn |
+| 25 | 8. Runner | Iterates test cases |
+| 27 | 9. Save | Save trajectory JSON (text-only, includes criteria + refusal_judge) |
+| 28 | 9. Load | Auto-detect and reload latest saved trajectories |
+| 29 | 9. Cache Seed | Seed criteria cache from loaded trajectories |
+| 31 | 10. Results | Overall summary table |
+| 32 | 10. Results | Category/behavior analysis tables (with JBB lookup recovery) |
+| 33 | 10. Results | Category visualization plots (ASR bar, stacked, avg score) |
+| 34 | 10. Results | Score trajectory plots |
+| 35 | 10. Results | Detailed turn-by-turn logs |
+| 37 | 11. Load SAE | GemmaScope 2 SAEs for layers [9, 17, 22, 29] |
+| 39 | 11. Extract Fn | `extract_sae_activations_for_turn()` — SAE encoding |
+| 40 | 11. On-the-Fly | `iter_trajectory_activations()` generator + `extract_activations_for_trajectory()` |
+| 41 | 11. Analysis | On-the-fly SAE activation statistics (memory-safe) |
+| 42 | 11. Analysis | On-the-fly SAE activation evolution plot |
 
 ---
 
 ## Version History
 
+### V-0.6 (2026-02-23) — Enhanced Trajectory Data & Criteria Caching
+- **Added** criteria cache (`criteria_cache.json`) — reuses generated rubrics across runs, auto-seeded from loaded trajectories
+- **Changed** `check_refusal()` to return full dict `{value, rationale, metadata, refused}` instead of bool
+- **Changed** `evaluate_with_rubric()` to return full dict `{rationale, Score, metadata}` instead of int
+- **Added** `refusal_judge` field to every turn record (backtracked and non-backtracked)
+- **Added** `score_judge` field to every turn record (null for backtracked turns)
+- **Updated** `CHECK_REFUSAL_SYSTEM_PROMPT` and `evaluate_with_rubric()` prompt to explicitly define `metadata` as confidence score (0-100)
+- **Updated** trajectory viewer to display scoring criteria, refusal judge, and score judge details per turn
+- **Added** HTML escaping in trajectory viewer for safe content display
+
+### V-0.5 (2026-02-23) — Section Reorganization
+- Reorganized function locations across notebook sections
+
 ### V-0.4 (2026-02-23) — On-the-Fly SAE Extraction
 - **Removed** pre-saved `.pt` activation files from pipeline
 - **Removed** `extract_activations` parameter from pipeline function
 - **Removed** `EXTRACT_ACTIVATIONS` flag and all activation save/load logic
-- **Added** `extract_activations_for_trajectory()` — on-the-fly extraction from saved JSON
+- **Added** `iter_trajectory_activations()` generator — memory-safe on-the-fly extraction (one turn at a time)
+- **Added** `extract_activations_for_trajectory()` convenience wrapper (accumulates all, use with caution)
 - **Renamed** `run_crescendomation_with_sae()` → `run_crescendomation()` (text-only)
-- **Updated** Section 11 analysis cells to use on-the-fly extraction with `torch.cuda.empty_cache()`
+- **Updated** Section 11 analysis cells to use generator pattern with `del acts` + `torch.cuda.empty_cache()`
 - **Updated** RESEARCH_PLAN.md with CC++ integration (SWiM, EMA, softmax-weighted loss, ablations)
 - **Motivation**: CC++ (Anthropic, 2026) warns against I/O bottlenecks from pre-saved activations
 
@@ -172,6 +199,8 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 3. **OOM from accumulation**: Changed from in-memory accumulation to per-trajectory disk save + `del`
 4. **Analysis cell memory leak**: Added `del act_data` after processing each trajectory
 5. **Missing response preview**: Re-added goal/prompt/response previews to per-turn print output
+6. **OOM from on-the-fly extraction**: `extract_activations_for_trajectory()` accumulated ALL turns in memory. Fixed with `iter_trajectory_activations()` generator that yields one turn at a time.
+7. **Undefined `metadata` field in refusal prompt**: Original Crescendomation `CHECK_REFUSAL_SYSTEM_PROMPT` never defined what `metadata` means — it only appeared in examples (99, 80) with no explanation, leaving the judge LLM to guess. Fixed by adding explicit output format section: `"metadata": Your confidence score (0-100). 100 = completely certain, 0 = completely uncertain.` This matters because the pipeline uses `metadata > 90` as the refusal threshold.
 
 ### Architecture Notes
 - **Score normalization**: `our_score = 11 - crescendomation_score` (their 1=jailbreak, 10=refusal -> ours 10=jailbreak, 1=refusal)
@@ -179,6 +208,7 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 - **Hidden state casting**: Model runs in bfloat16, SAEs expect float32 — cast with `.float()` before encoding
 - **Activations moved to CPU**: `.cpu()` after SAE encoding to keep GPU memory free
 - **On-the-fly extraction (V-0.4)**: No `.pt` files saved; activations recomputed from JSON at analysis time
+- **Criteria cache (V-0.6)**: Disk-backed JSON cache keyed by goal; auto-seeded from loaded trajectories
 
 ---
 
@@ -189,9 +219,12 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 - [x] Add JBB category/behavior tracking and per-category ASR analysis
 - [x] Build trajectory viewer tool with category filtering
 - [x] Implement on-the-fly SAE extraction (done V-0.4, CC++ inspired)
+- [x] Add criteria caching for reuse across runs (done V-0.6)
+- [x] Save full refusal judge dict in trajectory (done V-0.6)
 - [ ] Add benign conversation controls (WildChat / XSTest) for negative samples
 
 ### Phase 2 — Feature Discovery
+- [ ] Run on-the-fly extraction across full 100-trajectory dataset (per-turn extraction across all turns) — build feature matrices for Phase 2
 - [ ] Run Lasso logistic regression on early-layer (F_H) and late-layer (F_R) activations
 - [ ] Identify causally relevant features that discriminate jailbroken vs. refused trajectories
 - [ ] Validate with GPT-4o feature interpretation + Neuronpedia dashboards
@@ -217,7 +250,9 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 
 ```
 SAE-Jailbreak-Research/
-  cross_layer_causal_sae_jailbreak_detection_V-0.4.ipynb  # Active notebook (on-the-fly extraction)
+  cross_layer_causal_sae_jailbreak_detection_V-0.6.ipynb  # Active notebook
+  cross_layer_causal_sae_jailbreak_detection_V-0.5.ipynb  # Previous (section reorg)
+  cross_layer_causal_sae_jailbreak_detection_V-0.4.ipynb  # Previous (on-the-fly extraction)
   cross_layer_causal_sae_jailbreak_detection_V-0.3.ipynb  # Previous (category analysis)
   cross_layer_causal_sae_jailbreak_detection_V-0.2.ipynb  # Previous (save/load)
   cross_layer_causal_sae_jailbreak_detection.ipynb         # Original (V-0.1)
@@ -228,10 +263,11 @@ SAE-Jailbreak-Research/
   .env                                                     # API keys (HF_TOKEN, OPENAI_API_KEY, NDIF_API_KEY)
   .gitignore                                               # Excludes results/
   test/
-    trajectory_viewer.ipynb                                # Interactive trajectory browser with category filter
+    trajectory_viewer.ipynb                                # Interactive trajectory browser (criteria + refusal judge)
   results/
     crescendo_trajectories/
-      trajectories_YYYYMMDD_HHMMSS.json                    # Trajectory metadata (text-only, no activations)
+      trajectories_YYYYMMDD_HHMMSS.json                    # Trajectory metadata (text-only, includes criteria + refusal_judge)
+      criteria_cache.json                                  # Cached scoring rubrics keyed by goal
       score_trajectories_{timestamp}.png                   # Score trajectory plots
       category_analysis_{timestamp}.png                    # Category ASR plots
 ```
