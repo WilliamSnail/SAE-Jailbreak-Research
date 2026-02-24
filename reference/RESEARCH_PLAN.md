@@ -122,9 +122,9 @@ The original framework has three actors coordinated in a loop:
 
 | Actor | Role | Implementation |
 |---|---|---|
-| **Attacker LLM** | Generates escalating prompts using the Crescendo 6-stage strategy | GPT-4o via OpenAI API (`generate()` wrapper) |
-| **Target Model** | Responds to attacker's prompts | OpenAI-compatible endpoint |
-| **Judge LLM** | Scores each response + detects refusals | GPT-4o with dynamic rubric |
+| **Attacker LLM** | Generates escalating prompts using the Crescendo 6-stage strategy | Configurable: local Llama-3.1-8B or GPT-4o API (`attacker_generate()`) |
+| **Target Model** | Responds to attacker's prompts | Local Gemma-3-4B-IT via NNSight |
+| **Judge LLM** | Scores each response + detects refusals | Configurable: local model or GPT-4o API (`judge_generate()`) |
 
 **Crescendo 6-stage escalation strategy:**
 1. Educational inquiry foundation — innocuous related questions
@@ -206,36 +206,41 @@ Turn = {
 }
 ```
 
-**4. Keep attacker + judge on external API, target local:**
+**4. Configurable attacker + judge, target local:**
 
-The attacker and judge remain on GPT-4o (via OpenAI API) — they don't need SAE extraction. Only the target model runs locally through NNSight. This is the most efficient split:
+The pipeline supports independent model selection for attacker and judge (V-0.8). Each can be either a local HuggingFace model or an OpenAI API model. Only the target model runs through NNSight for SAE activation extraction.
+
+**Default configuration:** Local Llama-3.1-8B-Instruct as attacker, GPT-4o API as judge. This enables fully local trajectory generation while maintaining high-quality scoring.
+
+> **Known limitation:** Safety-tuned local attacker models (e.g., Llama-3.1-8B-Instruct) silently refuse to generate escalating Crescendo prompts in later rounds (round 5+) by returning empty `generatedQuestion` fields. The model's own safety training detects the harmful intent as the conversation escalates. This produces shorter trajectories with lower maximum scores compared to GPT-4o as attacker. Mitigation: retry logic with validation (≥10 chars), debug logging to file. For full-length trajectories, GPT-4o remains the recommended attacker.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              Modified Crescendomation Loop                       │
+│              Modified Crescendomation Loop (V-0.8)               │
 │                                                                 │
 │  Setup:                                                         │
+│  • Configure attacker/judge model (local or API, independent)   │
 │  • generate_score_rubric(goal) → task-specific rubric           │
 │  • Load Gemma-3-IT + SAEs via NNSight (local GPU)               │
 │                                                                 │
 │  For each harmful goal from JBB-Behaviors seed set:             │
 │                                                                 │
-│  1. Attacker LLM (GPT-4o, remote) generates user_t              │
+│  1. Attacker LLM (local/API) generates user_t                   │
 │     using Crescendo 6-stage strategy                            │
 │  2. Target model (Gemma, local) generates response_t             │
 │     → simultaneously extract SAE activations per layer          │
-│  3. check_refusal(response_t) via judge LLM (GPT-4o)            │
+│  3. check_refusal(response_t) via judge LLM (local/API)         │
 │     • If refused: backtrack, increment refusal counter,         │
 │       attacker retries with different approach                  │
 │     • If not refused: proceed to scoring                        │
 │  4. evaluate_with_rubric(response_t, rubric) → score (1–10)     │
 │     → normalize to 0–10 scale (invert)                          │
-│  5. Save (turn, score, activations) to trajectory               │
+│  5. Save (turn, score, models info) to trajectory               │
 │  6. If normalized_score > 8: jailbreak detected                 │
 │     → continue 1–2 more turns, then stop                       │
 │  7. If t > max_rounds OR backtracks > 10: stop                  │
 │                                                                 │
-│  Output: Trajectory with per-turn scores + SAE activations      │
+│  Output: Trajectory with per-turn scores + model metadata       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -720,6 +725,8 @@ with model.trace(prompt_t):
 | Detector architecture | MLP over linear probe | Linear probes cannot learn the AND/NOT condition of a jailbreak |
 | Intervention style | Add-only over subtract | Prevents over-clamping; restores F_R to natural refusal level |
 | Judge model | Crescendomation rubric judge (primary) + LlamaGuard-3-8B (validation) | Dynamic rubric adapts per-goal; LlamaGuard cross-validates for consistency |
+| Attacker model | GPT-4o (recommended) or local Llama-3.1-8B-Instruct | GPT-4o produces reliable 8-round trajectories; local models self-refuse at round 5+ due to safety training (V-0.8 finding) |
+| Attacker/judge split | Independent model selection for attacker vs judge | Enables local attacker + API judge, or any combination; models info saved in trajectory JSON for reproducibility |
 | Control dataset | XSTest | Tests for over-refusal specifically on sensitive-but-legal prompts |
 | Within-turn smoothing | SWiM (M=16 tokens) | CC++ ablation (Fig 5b) shows M=16 is optimal; converts sparse SAE spikes to continuous concept signals |
 | Across-turn smoothing | EMA (α=0.3) | Adapted from CC++ (α≈0.12 for tokens → α=0.3 for turns); provides ~3-turn memory appropriate for 5–10 turn conversations |

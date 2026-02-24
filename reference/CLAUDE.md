@@ -8,23 +8,29 @@ This is a Master's thesis research project on detecting and mitigating **multi-t
 
 The primary model is **Gemma-3-4B-IT** with **GemmaScope 2 SAEs** (JumpReLU architecture). All experimentation is done in Jupyter notebooks.
 
-## Current Status: Phase 1 Complete + SWiM Extraction (V-0.7)
+## Current Status: Phase 1 Complete + Local Attacker Mode (V-0.8)
 
-**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.7.ipynb`
+**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.8.ipynb`
 
 ### What's Built
-- **Full Crescendomation red-teaming pipeline**: GPT-4o attacker, Gemma-3-4B-IT target (NNSight), GPT-4o judge
+- **Full Crescendomation red-teaming pipeline**: Configurable attacker/judge (local or API), Gemma-3-4B-IT target (NNSight)
+- **Separate attacker/judge model config** (V-0.8): Independent `USE_LOCAL_ATTACKER` and `USE_LOCAL_JUDGE` flags. Attacker can be local Llama-3.1-8B while judge stays on GPT-4o API. Models info saved in trajectory JSON.
+- **Local attacker mode** (V-0.8): Llama-3.1-8B-Instruct via plain HuggingFace as attacker. JSON extraction via `str.find/rfind`. Retry + validation on empty outputs. Debug logging to file (toggle-able).
+- **VRAM management** (V-0.8): Unload cell after pipeline run frees target + attacker/judge models before SAE analysis
 - **On-the-fly SAE activation extraction** (V-0.4): No `.pt` files saved; activations recomputed from JSON at analysis time via `iter_trajectory_activations()` generator
 - **SWiM-aggregated SAE extraction** (V-0.7): Sliding Window Mean (M=16) smoothing + max-pool converts sparse per-token activations → compact `(d_sae,)` turn-level summaries. Level 1 of CC++ two-level temporal smoothing.
 - **Top-K feature tracking** (V-0.7): Heatmap of top-20 SAE latent indices per layer across turns; feature dynamics summary (persistent/emerged/disappeared/high-score-only); F_H/F_R candidate flagging
 - **Criteria caching** (V-0.6): Disk-backed JSON cache for scoring rubrics, auto-seeded from loaded trajectories
 - **Full judge data** (V-0.6): Both `refusal_judge` and `score_judge` dicts saved per turn (rationale + confidence)
 - **Category/behavior analysis**: Per-category ASR tables, visualization plots
-- **Trajectory viewer** (`test/trajectory_viewer.ipynb`): Interactive browser with category filtering, criteria display, judge details
+- **Trajectory viewer** (`test/trajectory_viewer.ipynb`): Interactive browser with category filtering, criteria display, judge details, model info display
 - **100-test-case run completed** (V-0.3): Full JBB-Behaviors dataset
 
+### Known Issue: Local Attacker Safety Self-Refusal
+Safety-tuned local models (e.g., Llama-3.1-8B-Instruct) silently refuse to generate escalating Crescendo prompts in later rounds by returning empty `generatedQuestion` fields while still filling `lastResponseSummary`. This is because the attacker model's own safety training detects the harmful intent of the conversation as it escalates. Rounds 1-3 work fine (innocuous questions), but by round 5-7 the model produces empty strings. Retry logic helps marginally but doesn't solve the root cause. Potential solutions: use a base (non-instruct) model, use an uncensored fine-tune, or fall back to API when local fails.
+
 ### What's Next
-- **Immediate**: Add benign conversation controls (WildChat/XSTest)
+- **Immediate**: Add benign conversation controls (WildChat/XSTest); resolve local attacker self-refusal issue
 - **Phase 2**: Lasso feature selection on SAE activations across full trajectory dataset
 - **Phase 3**: MLP detector with EMA across-turn smoothing (Level 2), softmax-weighted BCE loss
 - **Phase 4**: Conditional sparse clamping intervention
@@ -67,19 +73,20 @@ The `REMOTE` flag in each notebook switches between local GPU and NDIF remote in
 - Common dimension reference table
 - **Critical gotchas** (especially for remote execution): device mismatch, containers must be inside trace, `.save()` on containers, proxy limitations
 
-## Notebook Architecture (V-0.7)
+## Notebook Architecture (V-0.8)
 
 | Cell Range | Section | Description |
 |---|---|---|
 | 0-1 | Header | Architecture overview, CC++ references, next steps |
 | 3-5 | 1. Setup | Environment detection, imports, API config |
-| 7 | 2. Config | Model, SAE, Crescendomation parameters, criteria cache path |
+| 7 | 2. Config | Model, SAE, attacker/judge mode, debug log, Crescendomation parameters |
 | 9 | 3. Load Model | Gemma-3-4B-IT via NNSight with SDPA attention |
-| 11 | 4. Attacker/Judge | OpenAI API client + `attacker_generate()` |
-| 13-16 | 5. Functions | Rubric generation, evaluation, refusal check, Crescendo step |
+| 11 | 4. Attacker/Judge | Conditional model loading + `attacker_generate()` / `judge_generate()` dispatchers |
+| 13-16 | 5. Functions | Rubric generation, evaluation, refusal check, Crescendo step (with retry + debug log) |
 | 18 | 6. Target Gen | `target_generate()` via NNSight |
 | 20-21 | 7. Load JBB | Load JailbreakBench + convert to test cases |
 | 23-25 | 8. Pipeline | `run_crescendomation()` + runner loop |
+| 26 | 8. Unload | Free all loaded models (target + attacker/judge) to reclaim VRAM |
 | 27-29 | 9. Save/Load | Trajectory JSON save, auto-load, criteria cache seeding |
 | 31-35 | 10. Results | Summary tables, category analysis, plots, turn-by-turn logs |
 | 37-42 | 11. SAE | Load SAEs, extraction functions, on-the-fly analysis |
@@ -205,12 +212,6 @@ SAE-Jailbreak-Research/
 - Score normalization: `our_score = 11 - crescendomation_score` (their 1=jailbreak, 10=refusal → ours 10=jailbreak, 1=refusal).
 - On-the-fly extraction (V-0.4+): No `.pt` files — activations recomputed from JSON at analysis time.
 - Criteria cache (V-0.6): Auto-seeded from loaded trajectories; disk-backed JSON keyed by goal.
-- **Output paths**: Trajectory JSON → `results/crescendo_trajectories/`, plot PNGs → `results/images/`.
+- **Output paths**: Trajectory JSON → `results/crescendo_trajectories/`, plot PNGs → `results/images/`, debug log → `results/crescendo_trajectories/debug_log.txt`.
 - NNSight `model.generate(prompt, ...)` context (without `.trace()`) is used for text generation; `.trace()` is used for activation interception only.
-
-## Pending Modifications (V-0.6 Notebook)
-
-The following changes need to be applied to separate image output paths from trajectory paths:
-- **Cell 7 (config)**: Add `IMAGE_DIR = Path("results/images")` + `IMAGE_DIR.mkdir(...)` after OUTPUT_DIR lines; add print line
-- **Cell 33**: Change `OUTPUT_DIR` → `IMAGE_DIR` in `plt.savefig()` and `print()` for `category_analysis_{timestamp}.png`
-- **Cell 34**: Change `OUTPUT_DIR` → `IMAGE_DIR` in `plt.savefig()` and `print()` for `score_trajectories_{timestamp}.png`
+- **Local attacker self-refusal** (V-0.8): Safety-tuned models return empty `generatedQuestion` in later Crescendo rounds when their own safety training detects harmful escalation. See progress.md for details.
