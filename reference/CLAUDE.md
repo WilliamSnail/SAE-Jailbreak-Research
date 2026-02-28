@@ -8,9 +8,9 @@ This is a Master's thesis research project on detecting and mitigating **multi-t
 
 The primary model is **Gemma-3-4B-IT** with **GemmaScope 2 SAEs** (JumpReLU architecture). All experimentation is done in Jupyter notebooks.
 
-## Current Status: Phase 1 Complete + Local Attacker Mode (V-0.8)
+## Current Status: Phase 1 Complete + Local Attacker Mode (V-0.9)
 
-**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.8.ipynb`
+**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.9.ipynb`
 
 ### What's Built
 - **Full Crescendomation red-teaming pipeline**: Configurable attacker/judge (local or API), Gemma-3-4B-IT target (NNSight)
@@ -40,6 +40,12 @@ See [progress.md](progress.md) for detailed version history and [RESEARCH_PLAN.m
 ## Environment Setup
 
 Requires CUDA 13.0 (`cu130`) for PyTorch. Conda environment: `MI` (via miniforge3).
+
+**Python executable** (for running scripts from Claude Code / bash):
+```bash
+/c/Users/Lab622_TV/miniforge3/envs/MI/python.exe
+```
+Use this path when running Python from bash (e.g., notebook cell edits via `json.load/dump`). The default system `python` is a Windows App Store stub that fails with exit code 49.
 
 ```bash
 pip install -r requirements_3.txt
@@ -209,7 +215,7 @@ SAE-Jailbreak-Research/
 - **Layer access path for Gemma-3**: `model.model.language_model.layers[layer].output[0]` — the `language_model` wrapper exists because Gemma3ForConditionalGeneration is a VLM wrapper.
 - JailbreakBench uses `'test'` split and `'judge_comparison'` config — there is no `'train'` split.
 - For chat-formatted generation, set `tokenizer.padding_side = "left"` for batched inference.
-- Score normalization: `our_score = 11 - crescendomation_score` (their 1=jailbreak, 10=refusal → ours 10=jailbreak, 1=refusal).
+- Score convention: 1=refusal, 10=jailbreak. Rubric generates scores directly on our scale — no inversion needed. `normalize_score()` is a pass-through.
 - On-the-fly extraction (V-0.4+): No `.pt` files — activations recomputed from JSON at analysis time.
 - Criteria cache (V-0.6): Auto-seeded from loaded trajectories; disk-backed JSON keyed by goal.
 - **Output paths**: Trajectory JSON → `results/crescendo_trajectories/`, plot PNGs → `results/images/`, debug log → `results/crescendo_trajectories/debug_log.txt`.

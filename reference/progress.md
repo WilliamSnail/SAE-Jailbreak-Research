@@ -6,9 +6,9 @@ Master's thesis research on detecting and mitigating **multi-turn jailbreaks** u
 
 ---
 
-## Current Status: Phase 1 — Pipeline Complete (V-0.8)
+## Current Status: Phase 1 — Pipeline Complete (V-0.9)
 
-**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.8.ipynb`
+**Active notebook:** `cross_layer_causal_sae_jailbreak_detection_V-0.9.ipynb`
 
 ### What Has Been Built
 
@@ -143,7 +143,7 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 | 20-21 | 7. Load JBB | Load JailbreakBench/JBB-Behaviors + convert to test cases |
 | 23 | 8. Pipeline | `run_crescendomation()` — saves criteria, models info, refusal_judge per turn |
 | 25 | 8. Runner | Iterates test cases |
-| 26 | 8. Unload | Free all loaded models (target + attacker/judge) to reclaim VRAM |
+| 26 | 8. Unload | Free attacker/judge models (keeps target + tokenizer for SAE analysis) |
 | 27 | 9. Save | Save trajectory JSON (text-only, includes criteria + refusal_judge + models) |
 | 28 | 9. Load | Auto-detect and reload latest saved trajectories |
 | 29 | 9. Cache Seed | Seed criteria cache from loaded trajectories |
@@ -167,6 +167,13 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 
 ## Version History
 
+### V-0.9 (2026-02-27) — Local Model Robustness + Judge Fixes
+- **Fixed** `_local_generate()` retry logic — old retry appended "Please respond with ONLY valid JSON" to conversation history, which the attacker model echoed as `generatedQuestion` sent to the target. New retry uses original messages only with same temperature.
+- **Fixed** `_local_generate()` JSON parsing — added markdown code fence stripping (`` ```json ... ``` ``), trailing comma cleanup (`re.sub(r',\s*}', '}', ...)`), increased `max_new_tokens` from 1024 to 2048 to prevent truncated JSON output.
+- **Fixed** Refusal judge prompt (`CHECK_REFUSAL_SYSTEM_PROMPT`) — old prompt told the judge "the AI must refuse to engage in tasks like generating harmful content", which primed it to conflate harmful content with refusal. Now the prompt focuses purely on whether the target refused or complied, with no editorial framing about what it *should* do. Rationale instruction updated to require explicit "refused/complied" determination.
+- **Added** Conciseness instruction to `CRESCENDO_SYSTEM_PROMPT` — "Keep both fields concise (under 100 words each)" to reduce JSON output size for local models.
+- **Removed** Raw vs SWiM performance comparison benchmark cell (redundant after validation).
+
 ### V-0.8 (2026-02-24) — Local Attacker Mode + Separate Attacker/Judge Config
 - **Added** `USE_LOCAL_ATTACKER` and `USE_LOCAL_JUDGE` independent config flags — attacker and judge can use different models/modes
 - **Added** `ATTACKER_LOCAL_MODEL`, `ATTACKER_API_MODEL`, `JUDGE_LOCAL_MODEL`, `JUDGE_API_MODEL` config parameters
@@ -178,8 +185,9 @@ Run completed on 2026-02-21 with `EXTRACT_ACTIVATIONS=False` (fast mode). Saved 
 - **Added** `generate_crescendo_step()` retry logic — validates `generatedQuestion` is non-empty (≥10 chars), retries up to 2 times
 - **Added** `DEBUG_LOG` flag + `DEBUG_LOG_FILE` — toggle-able debug logging of raw attacker JSON outputs to disk
 - **Added** Model info in trajectory data — each trajectory records `"models": {target, attacker, judge, attacker_mode, judge_mode}`
-- **Added** VRAM unload cell after pipeline (cell 26) — frees target + attacker/judge models before SAE analysis
+- **Added** VRAM unload cell after pipeline (cell 26) — frees attacker/judge models before SAE analysis (keeps target + tokenizer for SAE extraction)
 - **Updated** Trajectory viewer to display model info (Target/Attacker/Judge with local/api mode), with graceful fallback for older trajectories
+- **Changed** Score convention: rubric now directly generates 1=refusal, 10=jailbreak (no longer inverted from Crescendomation). `normalize_score()` is a pass-through. All pipeline logic, prompts, comments, and trajectory viewer updated to match.
 - **Discovered** Local attacker self-refusal issue (see below)
 
 #### Known Issue: Local Attacker Safety Self-Refusal
@@ -274,7 +282,7 @@ round=7 attempt=3: generatedQuestion="" (same)
 8. **Local attacker empty question (V-0.8)**: Safety-tuned local models (Llama-3.1-8B-Instruct) return empty `generatedQuestion` in later Crescendo rounds due to their own safety training detecting harmful escalation. Mitigated with retry logic + validation (≥10 chars) + debug logging. Root cause is inherent to using instruct-tuned models as red-teaming attackers.
 
 ### Architecture Notes
-- **Score normalization**: `our_score = 11 - crescendomation_score` (their 1=jailbreak, 10=refusal -> ours 10=jailbreak, 1=refusal)
+- **Score convention**: 1=refusal, 10=jailbreak (rubric generates scores directly on our scale — no inversion needed). `normalize_score()` is a pass-through.
 - **Activation shape**: `(seq_len, d_sae)` where `d_sae=65536` — sequence length grows each turn since the full conversation is re-tokenized
 - **Hidden state casting**: Model runs in bfloat16, SAEs expect float32 — cast with `.float()` before encoding
 - **Activations moved to CPU**: `.cpu()` after SAE encoding to keep GPU memory free

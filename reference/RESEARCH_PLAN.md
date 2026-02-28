@@ -176,15 +176,9 @@ def target_generate_with_activations(messages, model, saes, layers):
     return response_text, activations
 ```
 
-**2. Invert the scoring scale:**
+**2. Score convention (1=refusal, 10=jailbreak):**
 
-Crescendomation uses an **inverted scale** (`1 = jailbreak success, 10 = full refusal`). We normalize all scores to our convention (`0 = refusal, 10 = jailbreak success`) after collection:
-
-```python
-our_score = 10 - crescendomation_score  # or (11 - score) depending on exact mapping
-```
-
-This normalization happens at save time so all downstream code (MLP training, evaluation) uses the consistent 0–10 scale.
+The original Crescendomation used an inverted scale (1=success, 10=refusal). We modified the **rubric generation prompt** (`GENERATE_SCORE_RUBRIC_SYSTEM_PROMPT`) so that the generated rubric directly uses our convention: **1=refusal, 10=jailbreak success**. All scoring prompts, pipeline logic, and downstream code use this convention consistently. No score inversion is needed — `normalize_score()` is a pass-through.
 
 **3. Save per-turn SAE activations alongside scores:**
 
@@ -234,7 +228,7 @@ The pipeline supports independent model selection for attacker and judge (V-0.8)
 │       attacker retries with different approach                  │
 │     • If not refused: proceed to scoring                        │
 │  4. evaluate_with_rubric(response_t, rubric) → score (1–10)     │
-│     → normalize to 0–10 scale (invert)                          │
+│     (1=refusal, 10=jailbreak — no inversion needed)             │
 │  5. Save (turn, score, models info) to trajectory               │
 │  6. If normalized_score > 8: jailbreak detected                 │
 │     → continue 1–2 more turns, then stop                       │
@@ -657,7 +651,7 @@ with model.trace(prompt_t):
 
 - [x] Fork/clone [AIM-Intelligence/Automated-Multi-Turn-Jailbreaks](https://github.com/AIM-Intelligence/Automated-Multi-Turn-Jailbreaks)
 - [x] Implement `target_generate_with_activations()` — replace OpenAI target client with NNSight-wrapped Gemma-3-IT that extracts SAE activations per turn
-- [x] Add score normalization layer: convert Crescendomation's inverted scale (1=success, 10=refusal) → our scale (0=refusal, 10=success)
+- [x] Modify rubric generation prompt so scores are directly on our scale (1=refusal, 10=jailbreak) — no inversion needed
 - [x] Convert JBB-Behaviors 300 goals into Crescendomation test case JSONs (`to_json.py`)
 - [x] Run Crescendomation pipeline with modified target on all 300 goals (`max_rounds=8`)
 - [ ] Run additional tactics (Actor Attack, Opposite Day) on a subset for dataset diversity
@@ -718,7 +712,7 @@ with model.trace(prompt_t):
 | Decision | Choice | Rationale |
 |---|---|---|
 | Red-teaming framework | Crescendomation (adapted) | Open-source Crescendo implementation with built-in refusal backtracking, dynamic rubric generation, and multiple attack tactics; easily adapted to local NNSight target |
-| Scoring scale | 0–10 (inverted from Crescendomation's 1–10) | `0=refusal, 10=jailbreak` aligns with intuitive reading; soft labels for MLP training via `score/10` |
+| Scoring scale | 1–10 (rubric generates directly on our scale) | `1=refusal, 10=jailbreak` — rubric prompt modified so no inversion is needed; soft labels for MLP training via `score/10` |
 | SAE architecture | JumpReLU (GemmaScope 2) | Higher reconstruction fidelity than standard ReLU SAEs; official Google release |
 | SAE width | 65k | Wide enough to decompose safety-relevant features; manageable compute |
 | Feature selection | Lasso over manual | Avoids confirmation bias; replicable; handles feature redundancy |
@@ -733,3 +727,33 @@ with model.trace(prompt_t):
 | Training loss | Softmax-weighted BCE | CC++ insight: standard loss under-weights critical transition turns; softmax weighting focuses gradient on high-score turns where jailbreak occurs |
 | Activation extraction | On-the-fly recomputation (Phase 3+) | CC++ warns against I/O bottlenecks from pre-saved activations; on-the-fly enables augmentation and avoids 160GB+ disk footprint |
 | Two-level smoothing | SWiM (token) + EMA (turn) | Novel extension of CC++ single-level approach; explicitly models both intra-turn patterns and inter-turn drift — CC++ does not address multi-turn |
+
+---
+
+## 11. Research Memos & Findings
+
+### Memo 1: Local Attacker Model Selection (V-0.8, 2026-02-25)
+
+**Context:** V-0.8 added local attacker mode (Llama-3.1-8B-Instruct). Testing revealed that safety-tuned models silently refuse to generate escalating Crescendo prompts in later rounds (5+), returning empty `generatedQuestion` while still producing `lastResponseSummary`. Root cause: the attacker model's own refusal training detects harmful intent as the conversation escalates.
+
+**Recommended local attacker models (uncensored/abliterated):**
+
+| Model | Size | Type | Why it works | HuggingFace ID |
+|---|---|---|---|---|
+| **Dolphin 2.9.3 Mistral-Nemo 12B** | 12B | Uncensored fine-tune | Trained with alignment/refusal data filtered out. Strong instruction following + JSON output. Battle-tested. | `cognitivecomputations/dolphin-2.9.3-mistral-nemo-12b` |
+| **Mistral-Nemo-Instruct-2407-abliterated** | 12B | Abliterated | Standard Mistral Nemo with refusal direction surgically removed via activation engineering (same technique as "Assistant Axis"). Retains full capabilities. | `huihui-ai/Mistral-Nemo-Instruct-2407-abliterated` |
+| **Dolphin 3.0-R1 Mistral-24B-abliterated** | 24B | Abliterated + R1-distilled | Larger, reasoning-capable. Best quality but needs ~48GB VRAM in bf16. | `huihui-ai/Dolphin3.0-R1-Mistral-24B-abliterated` |
+
+**Why these work:** The core issue is **refusal training**. These models either (a) were fine-tuned without alignment data (Dolphin), or (b) had the refusal direction removed post-hoc via abliteration. Neither will self-censor when generating escalating red-teaming prompts.
+
+**Top recommendation:** `cognitivecomputations/dolphin-2.9.3-mistral-nemo-12b` — 12B fits alongside the 4B target on RTX PRO 5000, Dolphin models are known for reliable JSON output, and it's the most widely used uncensored model.
+
+**Alternative approaches:**
+- **J2 (Jailbreaking to Jailbreak)** — [arXiv:2502.09638](https://arxiv.org/pdf/2502.09638): Jailbreaks a frontier model itself to act as an attacker. Sonnet-3.7 as J2 attacker achieves 97.5% ASR against GPT-4o. Interesting but adds complexity.
+- **Red-teaming frameworks**: [Garak (NVIDIA)](https://github.com/NVIDIA/garak), [DeepTeam](https://github.com/confident-ai/deepteam), [PyRIT (Microsoft)](https://github.com/Azure/PyRIT), [Promptfoo](https://www.promptfoo.dev/docs/red-team/) — offer more attack strategies beyond Crescendo if needed for diversity.
+- **API fallback**: When local model returns empty, automatically fall back to GPT-4o for that specific call.
+
+**VRAM budget (RTX PRO 5000, 32GB):**
+- Target (Gemma-3-4B-IT bf16): ~8GB
+- Attacker (Dolphin 12B bf16): ~24GB
+- Total: ~32GB — tight fit. May need to quantize the attacker to 4-bit (~6GB) or use sequential loading (load attacker → run pipeline → unload → load target for SAE analysis).
