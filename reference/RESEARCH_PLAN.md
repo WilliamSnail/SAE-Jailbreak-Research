@@ -364,43 +364,188 @@ Top discriminative latents by combined score:
 
 ---
 
-## 5. Phase 2 — Unsupervised Feature Discovery via Lasso (Status: Not Started)
+## 5. Phase 2 — Feature Discovery via Elastic Net with Δ-Features (Status: In Progress)
 
-### 5.1 Why Lasso Over the Current Composite Score
+### 5.1 Why Elastic Net with Δ-Features
 
-The current composite score (freq_diff + KL + mean_diff) selects features independently. Lasso logistic regression selects features that are *jointly* discriminative, removes redundant correlated features, and provides a principled sparsity guarantee.
+The Phase 1 composite score (freq_diff + KL + mean_diff) selects features independently. We need a method that selects features that are *jointly* discriminative while capturing the *temporal dynamics* of multi-turn jailbreak erosion.
 
-### 5.2 Method
+**Elastic Net (L1+L2) over pure Lasso (L1):**
+- L1 provides sparsity — selects a small, interpretable subset of SAE latents
+- L2 provides stability — SAE features are correlated (multiple latents encode related concepts); pure L1 arbitrarily picks one from a correlated group, making results unstable across runs. L2 keeps correlated features together.
 
-**Input matrix construction:**
+**Δ-features (turn-to-turn deltas):**
+- The thesis argues jailbreaking is a *state transition*, not a static state. Δ-features make the transition explicit in the feature space.
+- Raw activations capture "where the model is" — Δ-features capture "where it's moving" (drift direction and speed).
+- Jailbreak erosion is often visible first in Δ (the *change* in safety features), before absolute activation levels look extreme.
 
-For each trajectory in the training set, aggregate `Z_early` and `Z_late` across the final turn's response tokens into a single vector per trajectory:
+### 5.2 Input Construction
+
+#### Step 1: SWiM-Aggregated Turn-Level Vectors
+
+For each turn `t` in a trajectory, extract SWiM-aggregated SAE activations (Level 1 smoothing, implemented in V-0.7):
 
 ```
-X_early[n] = mean_pool(Z_early) over response tokens of turn T  →  shape (d_sae,)
-X_late[n]  = mean_pool(Z_late)  over response tokens of turn T  →  shape (d_sae,)
-y[n] = 1 if jailbroken, 0 if refused
+z_t^(L) = SWiM(SAE_L(hidden_states_L), M=16)    # shape: (d_sae,) per layer
 ```
 
-**Train two separate Lasso classifiers:**
+Concatenate across all 4 layers into a single turn-level vector:
+
+```
+z_t = [z_t^(9), z_t^(17), z_t^(22), z_t^(29)]    # shape: (4 × 65536,) = (262144,)
+```
+
+#### Step 2: Δ-Features (Turn-to-Turn Change)
+
+```
+Δz_t = z_t - z_{t-1}    # for t ≥ 2
+Δz_1 = 0                # first turn has no prior reference
+```
+
+#### Step 3: Full Feature Vector
+
+```
+x_t = [z_t ⊕ Δz_t]    # shape: (524288,)
+```
+
+**Index layout:**
+
+| Block | Indices | Content |
+|---|---|---|
+| Raw L9 | 0 : 65536 | SWiM-aggregated activations, layer 9 |
+| Raw L17 | 65536 : 131072 | SWiM-aggregated activations, layer 17 |
+| Raw L22 | 131072 : 196608 | SWiM-aggregated activations, layer 22 |
+| Raw L29 | 196608 : 262144 | SWiM-aggregated activations, layer 29 |
+| Δ L9 | 262144 : 327680 | Turn-to-turn change, layer 9 |
+| Δ L17 | 327680 : 393216 | Turn-to-turn change, layer 17 |
+| Δ L22 | 393216 : 458752 | Turn-to-turn change, layer 22 |
+| Δ L29 | 458752 : 524288 | Turn-to-turn change, layer 29 |
+
+#### Step 4: Labels
+
+- **Soft labels (training):** `y_t = judge_score_t / 10` — continuous 0.0–1.0, gives gradient signal at every turn
+- **Hard labels (evaluation):** `y_t = 1 if judge_score_t > 8 else 0`
+
+#### Step 5: Two-Stage Feature Filtering (Mandatory Dimensionality Reduction)
+
+The raw feature vector is 524,288-dimensional, but SAEs are **sparse by design** — for any given input, only ~1–5% of latents activate (fire > 0). Most latents never fire at all or fire too rarely to be useful. These must be removed before training.
+
+**Why this is critical:**
+- **`p >> n` problem:** 524k features vs ~1000 samples. Elastic Net handles `p > n`, but a 500× ratio with mostly-dead features causes slow convergence and spurious feature selection.
+- **Compute:** Elastic Net on 500k features takes 40+ minutes per CV fold. On ~10k features, it takes seconds.
+
+**Why variance filtering alone fails for SWiM features:**
+
+SWiM max-pooling takes the **peak** activation from a sliding window. A feature that fires on just 1 token in 1 turn out of ~1000 turns can still have enormous variance from that single spike — but it's useless for classification (one data point is noise, not a pattern). With variance threshold=100, ~55k features still survive. Variance measures "how spread out are the values", not "is this feature consistently informative."
+
+**Two-stage approach:**
+
+**Stage 1 — Firing rate filter:** Drop features that are active (> 0) in fewer than `MIN_FIRING_PCT` percent of turns. A feature that fires in 3/1074 turns (0.3%) cannot reliably distinguish jailbroken from safe. A threshold of 5% means: "only keep features active in at least ~54 turns" — enough data for the Elastic Net to find a real pattern.
 
 ```python
-from sklearn.linear_model import LogisticRegression
-
-lasso_early = LogisticRegression(penalty='l1', solver='liblinear', C=0.1)
-lasso_early.fit(X_early_train, y_train)
-
-lasso_late = LogisticRegression(penalty='l1', solver='liblinear', C=0.1)
-lasso_late.fit(X_late_train, y_train)
+firing_rates = (X > 0).mean(axis=0) * 100  # % of turns each feature fires
+firing_mask = firing_rates > 5.0            # MIN_FIRING_PCT = 5%
+X_stage1 = X[:, firing_mask]                # 524k → ~10k-50k
 ```
 
-**Feature selection:**
-- `F_H = {i : lasso_early.coef_[0][i] != 0}` — early-layer features with nonzero weight
-- `F_R = {i : lasso_late.coef_[0][i] != 0}` — late-layer features with nonzero weight
+**Stage 2 — SelectKBest (ANOVA F-test):** After firing rate filtering, many surviving features fire frequently but have nothing to do with jailbreaking (e.g., punctuation, formatting features). The ANOVA F-test asks per feature: "does this feature's distribution differ between jailbroken (y=1) and safe (y=0) turns?" Features with significantly different activation levels between classes get high F-scores. Keep the top K.
 
-Tune `C` (inverse regularization strength) via cross-validation to control how many features are selected (target: ~20–100 per layer).
+```python
+from sklearn.feature_selection import SelectKBest, f_classif
 
-### 5.3 Semantic Verification via GPT-4o
+kbest = SelectKBest(f_classif, k=10000)
+X_stage2 = kbest.fit_transform(X_stage1, y_hard)  # ~10k-50k → 10,000
+```
+
+**Full reduction pipeline:**
+
+```
+524,288 features (raw + Δ concatenation)
+  → Stage 1: Firing rate filter (>5%)        → ~10,000–50,000 (removes rarely-firing)
+  → Stage 2: SelectKBest (ANOVA, top 10k)    → ~10,000 (keeps jailbreak-relevant)
+  → Z-score normalize
+  → Elastic Net (L1 sparsity selection)       → ~50–200 non-zero coefficients
+  → F_H / F_R feature sets for Phase 3 MLP
+```
+
+#### Step 6: Z-Score Normalization
+
+After two-stage filtering, normalize surviving features:
+
+1. **Z-score normalization:** `StandardScaler` per feature across the full dataset — prevents high-variance features from dominating the Elastic Net regularization
+2. **Optional outlier clipping:** Cap at ±5σ to reduce influence of rare extreme activations
+
+### 5.3 Elastic Net Training
+
+Train a single joint model on all layers + Δ-features:
+
+```python
+from sklearn.linear_model import SGDClassifier
+
+model = SGDClassifier(
+    loss='log_loss',
+    penalty='elasticnet',
+    l1_ratio=0.7,        # 70% L1 (sparsity) + 30% L2 (stability)
+    alpha=1e-4,           # regularization strength — tune via CV
+    max_iter=1000
+)
+model.fit(X_scaled, y_hard)
+```
+
+**Why `SGDClassifier`:** With 500k+ features after concatenation, `liblinear` solver is too slow. SGD scales linearly with feature count.
+
+**Cross-validation grid:**
+- `alpha` ∈ {1e-3, 1e-4, 1e-5} — controls total regularization strength
+- `l1_ratio` ∈ {0.5, 0.7, 0.9} — tradeoff between sparsity and stability
+
+**Target:** ~50–200 total non-zero features (sparse enough for interpretability, sufficient for the Phase 3 MLP).
+
+### 5.4 Feature Set Extraction & Three-Score Decomposition
+
+From the trained weight vector `w`, partition by layer group:
+
+**Feature sets:**
+- `F_H = {i : w[i] != 0, i ∈ layers 9,17 raw+Δ}` — Harm Recognition features (semantic drift)
+- `F_R = {i : w[i] != 0, i ∈ layers 22,29 raw+Δ}` — Refusal Execution features (safety erosion)
+
+**Three drift scores per turn:**
+
+```
+semantic_drift_t  = w[F_H_indices] · x_t[F_H_indices]     # F_H contribution (layers 9, 17)
+safety_erosion_t  = w[F_R_indices] · x_t[F_R_indices]     # F_R contribution (layers 22, 29)
+global_drift_t    = w · x_t                                # full model score
+```
+
+These map directly to the thesis hypothesis:
+
+| Score | Circuit | What it captures |
+|---|---|---|
+| Semantic drift | F_H (layers 9, 17) | Model *recognizes* harmful intent; context is shifting |
+| Safety erosion | F_R (layers 22, 29) | Model's *refusal behavior* is weakening |
+| Global drift | F_H + F_R combined | Overall jailbreak progression |
+
+**Expected trajectory patterns:**
+
+| Trajectory type | Semantic drift (F_H) | Safety erosion (F_R) | Global |
+|---|---|---|---|
+| Successful jailbreak | Rises early (turns 2–4), stays high | Rises later (turns 5–7), overtakes | Crosses threshold |
+| Failed attack (refused) | May rise slightly | Stays low (refusal holds) | Below threshold |
+| Benign conversation | Flat/low | Flat/low | Flat/low |
+
+The **widening gap** between semantic drift (high) and safety erosion (rising) is the causal decoupling the thesis detects — F_H active while F_R is being suppressed.
+
+### 5.5 Δ-Feature Analysis
+
+Report the composition of selected features:
+
+| Layer group | Raw features selected | Δ features selected | Interpretation |
+|---|---|---|---|
+| F_H (9, 17) | N | M | Raw = "model sees harm"; Δ = "harm recognition is *changing*" |
+| F_R (22, 29) | N | M | Raw = "refusal is active"; Δ = "refusal is *eroding*" |
+
+**Key thesis finding:** If Δ-features dominate the selected set, it supports the "state transition" claim — drift *direction* matters more than absolute circuit activation levels. If raw features dominate, absolute levels are more predictive.
+
+### 5.6 Semantic Verification via GPT-4o
 
 For each selected feature, query Neuronpedia for the top-activating examples, then call GPT-4o:
 
@@ -414,6 +559,21 @@ Expected output for F_H features: "harmful instructions", "illegal activity fram
 Expected output for F_R features: "apologetic refusal", "safety policy citation", "declining harmful request"
 
 Features whose interpretation misaligns are excluded from F_H / F_R sets.
+
+### 5.7 Output Artifacts
+
+Saved to `results/feature_discovery/` for Phase 3:
+
+```json
+{
+    "F_H": {"indices": [...], "layers": [9, 17], "includes_delta": true, "n_raw": N, "n_delta": M},
+    "F_R": {"indices": [...], "layers": [22, 29], "includes_delta": true, "n_raw": N, "n_delta": M},
+    "scaler_params": {"mean": [...], "std": [...]},
+    "elastic_net_params": {"alpha": 1e-4, "l1_ratio": 0.7},
+    "variance_threshold": 0.001,
+    "gpt4o_interpretations": {"feature_idx": "concept label", ...}
+}
+```
 
 ---
 
@@ -626,10 +786,13 @@ with model.trace(prompt_t):
 
 1. **Single layer vs. cross-layer MLP:** Does using only F_H or only F_R (not both) match the cross-layer MLP?
 2. **EMA α sensitivity:** Does smoothing improve precision without hurting latency?
-3. **Lasso features vs. composite score features:** Does Lasso selection outperform the current heuristic ranking?
-4. **Width sensitivity:** 16k vs. 65k vs. 262k SAE — does wider SAE improve feature quality?
-5. **Layer sensitivity:** Is the F_H / F_R layer assignment (early=7–13, late=17–22) optimal, or do different layer pairs perform better?
-6. **Temporal smoothing ablation (CC++-inspired, replicate Figure 5b style):** Compare detection performance across smoothing configurations. This is a key contribution — demonstrating that SAE feature sparsity is a real problem and temporal smoothing solves it.
+3. **Elastic Net features vs. composite score features:** Does Elastic Net selection outperform the current heuristic ranking (freq_diff + KL + mean_diff)?
+4. **Raw features vs. Raw+Δ features:** Do turn-to-turn Δ-features improve feature selection and drift detection? If Δ-features dominate, it supports the "state transition" thesis claim.
+5. **Elastic Net vs. pure Lasso:** Does L2 stability (`l1_ratio=0.7`) improve feature selection consistency over pure L1 (`l1_ratio=1.0`) with correlated SAE features?
+6. **Joint model vs. separate per-layer-group:** Does training one Elastic Net on all layers outperform two separate models (one for F_H layers, one for F_R)?
+7. **Width sensitivity:** 16k vs. 65k vs. 262k SAE — does wider SAE improve feature quality?
+8. **Layer sensitivity:** Is the F_H / F_R layer assignment (early=9–17, late=22–29) optimal, or do different layer pairs perform better?
+9. **Temporal smoothing ablation (CC++-inspired, replicate Figure 5b style):** Compare detection performance across smoothing configurations. This is a key contribution — demonstrating that SAE feature sparsity is a real problem and temporal smoothing solves it.
 
 | Configuration | Within-Turn | Across-Turn | Expected result |
 |---|---|---|---|
@@ -669,12 +832,25 @@ with model.trace(prompt_t):
 - [ ] Implement saving of candidate latent results to `results/candidate_latents_layer_{N}.csv`
 - [ ] Run Gemma-3-1B-IT and Gemma-3-4B-IT side-by-side to check layer correspondence
 
-### Phase 2 — Lasso Feature Selection
+### Phase 2 — Elastic Net Feature Discovery with Δ-Features
 
-- [ ] Build trajectory-level feature matrix (aggregate Z_early, Z_late per trajectory)
-- [ ] Implement Lasso with cross-validation for C selection
-- [ ] GPT-4o interpretation loop for top-ranked features
-- [ ] Save final F_H and F_R feature sets to JSON for use in downstream phases
+- [ ] Build per-turn feature matrix: SWiM-aggregated vectors across 4 layers → `z_t` (262144-dim)
+- [ ] Compute Δ-features: `Δz_t = z_t - z_{t-1}` for turn-to-turn change
+- [ ] Concatenate `x_t = [z_t, Δz_t]` (524288-dim) with per-turn judge score labels
+- [ ] Variance filtering: drop near-zero-variance features (reduce 524k → ~5k–20k active)
+- [ ] Z-score normalization (`StandardScaler`) across full dataset
+- [ ] Train Elastic Net (`SGDClassifier`, `penalty='elasticnet'`) with cross-validation over `alpha` and `l1_ratio`
+- [ ] Extract F_H (layers 9, 17 raw+Δ) and F_R (layers 22, 29 raw+Δ) feature sets from non-zero coefficients
+- [ ] Compute three-score decomposition: semantic drift, safety erosion, global drift per turn
+- [ ] Plot three-score trajectories for sample jailbroken vs refused conversations
+- [ ] Analyze raw vs Δ feature composition in F_H and F_R sets
+- [ ] GPT-4o semantic interpretation loop for top-ranked features via Neuronpedia
+- [ ] Exclude misaligned features based on GPT-4o interpretation
+- [ ] Save final F_H, F_R, scaler params, interpretations to `results/feature_discovery/`
+- [ ] **Ablation:** Raw-only vs Raw+Δ features
+- [ ] **Ablation:** Elastic Net vs pure Lasso (`l1_ratio=1.0`)
+- [ ] **Ablation:** Joint model vs separate per-layer-group models
+- [ ] **Ablation:** Firing rate threshold (2% vs 5% vs 10%) and SelectKBest K (5k vs 10k vs 20k)
 
 ### Phase 3 — MLP Detector (CC++ Enhanced)
 
@@ -715,7 +891,9 @@ with model.trace(prompt_t):
 | Scoring scale | 1–10 (rubric generates directly on our scale) | `1=refusal, 10=jailbreak` — rubric prompt modified so no inversion is needed; soft labels for MLP training via `score/10` |
 | SAE architecture | JumpReLU (GemmaScope 2) | Higher reconstruction fidelity than standard ReLU SAEs; official Google release |
 | SAE width | 65k | Wide enough to decompose safety-relevant features; manageable compute |
-| Feature selection | Lasso over manual | Avoids confirmation bias; replicable; handles feature redundancy |
+| Feature selection | Elastic Net (L1+L2) over pure Lasso | L1 provides sparsity; L2 stabilizes selection across runs when SAE features are correlated. Single joint model across all layers with post-hoc F_H/F_R decomposition |
+| Δ-features | Turn-to-turn deltas (`Δz_t = z_t - z_{t-1}`) | Jailbreaking is a state transition — Δ-features capture drift direction and speed, often visible before absolute levels look extreme. Concatenated with raw features for Elastic Net input |
+| Three-score decomposition | Semantic drift (F_H) + Safety erosion (F_R) + Global | Partition Elastic Net coefficients by layer group to produce interpretable per-turn scores. The widening gap between semantic drift and safety erosion visualizes the causal decoupling hypothesis |
 | Detector architecture | MLP over linear probe | Linear probes cannot learn the AND/NOT condition of a jailbreak |
 | Intervention style | Add-only over subtract | Prevents over-clamping; restores F_R to natural refusal level |
 | Judge model | Crescendomation rubric judge (primary) + LlamaGuard-3-8B (validation) | Dynamic rubric adapts per-goal; LlamaGuard cross-validates for consistency |
