@@ -364,7 +364,7 @@ Top discriminative latents by combined score:
 
 ---
 
-## 5. Phase 2 — Feature Discovery via Elastic Net with Δ-Features (Status: In Progress)
+## 5. Phase 2 — Feature Discovery via Elastic Net with Δ-Features (Status: Core Complete — GPT-4o verification + ablations remaining)
 
 ### 5.1 Why Elastic Net with Δ-Features
 
@@ -706,7 +706,7 @@ Saved to `results/feature_discovery/` for Phase 3:
 
 ---
 
-## 6. Phase 3 — Causal Drift Detection: The Non-Linear MLP (Status: Not Started)
+## 6. Phase 3 — Causal Drift Detection: The Non-Linear MLP (Status: Implementation Written — Pending GPU Run)
 
 ### 6.1 Input Representation: Two-Level Temporal Smoothing
 
@@ -963,32 +963,36 @@ with model.trace(prompt_t):
 
 ### Phase 2 — Elastic Net Feature Discovery with Δ-Features
 
-- [ ] Build per-turn feature matrix: SWiM-aggregated vectors across 4 layers → `z_t` (262144-dim)
-- [ ] Compute Δ-features: `Δz_t = z_t - z_{t-1}` for turn-to-turn change
-- [ ] Concatenate `x_t = [z_t, Δz_t]` (524288-dim) with per-turn judge score labels
-- [ ] Variance filtering: drop near-zero-variance features (reduce 524k → ~5k–20k active)
-- [ ] Z-score normalization (`StandardScaler`) across full dataset
-- [ ] Train Elastic Net (`SGDClassifier`, `penalty='elasticnet'`) with cross-validation over `alpha` and `l1_ratio`
-- [ ] Extract F_H (layers 9, 17 raw+Δ) and F_S (layers 22, 29 raw+Δ) feature sets from non-zero coefficients
-- [ ] Compute three-score decomposition: semantic drift, safety erosion, global drift per turn
-- [ ] Plot three-score trajectories for sample jailbroken vs refused conversations
-- [ ] Analyze raw vs Δ feature composition in F_H and F_S sets
+- [x] Build per-turn feature matrix: SWiM-aggregated vectors across 4 layers → `z_t` (262144-dim)
+- [x] Compute Δ-features: `Δz_t = z_t - z_{t-1}` for turn-to-turn change
+- [x] Concatenate `x_t = [z_t, Δz_t]` (524288-dim) with per-turn judge score labels
+- [x] Two-stage filtering: firing rate >5% + SelectKBest ANOVA F-test (K=10000) → 10,000 features
+- [x] Z-score normalization (`StandardScaler`) across full dataset
+- [x] Train Elastic Net (`SGDClassifier`, `penalty='elasticnet'`) with cross-validation — strong-reg grid (alpha ∈ {1.0, 0.1, 0.01}), best: alpha=0.01, l1_ratio=0.5, AUC=0.7762, 435 non-zero features
+- [x] Extract F_H (layers 9, 17 raw+Δ) and F_S (layers 22, 29 raw+Δ) feature sets from non-zero coefficients
+- [x] Compute three-score decomposition: semantic drift, safety erosion, global drift per turn
+- [x] Plot three-score trajectories for sample jailbroken vs refused conversations
+- [x] Analyze raw vs Δ feature composition in F_H and F_S sets
 - [ ] GPT-4o semantic interpretation loop for top-ranked features via Neuronpedia
 - [ ] Exclude misaligned features based on GPT-4o interpretation
-- [ ] Save final F_H, F_S, scaler params, interpretations to `results/feature_discovery/`
+- [x] Save final F_H, F_S, scaler params, interpretations to `results/feature_discovery/`
 - [ ] **Ablation:** Raw-only vs Raw+Δ features
 - [ ] **Ablation:** Elastic Net vs pure Lasso (`l1_ratio=1.0`)
 - [ ] **Ablation:** Joint model vs separate per-layer-group models
 - [ ] **Ablation:** Firing rate threshold (2% vs 5% vs 10%) and SelectKBest K (5k vs 10k vs 20k)
 
-### Phase 3 — MLP Detector (CC++ Enhanced)
+### Phase 3 — MLP Detector (CC++ Enhanced) — Section 13 in V-1.0 notebook
 
 - [x] Implement SWiM (M=16) within-turn token aggregation on selected SAE features (V-0.7: `swim_aggregate()`, `extract_sae_activations_swim()`, `iter_trajectory_activations_swim()`)
-- [ ] Implement EMA (α=0.3) across-turn smoothing on turn-level feature summaries
-- [ ] Build on-the-fly SAE extraction data loader (recompute activations in training loop, no pre-saved `.pt`)
-- [ ] Implement trajectory-level data loader (sequence of smoothed ψ_t vectors per conversation)
-- [ ] Implement softmax-weighted BCE loss function
-- [ ] Train MLP with soft labels from per-turn judge scores (`score_t / 10`)
+- [x] Implement EMA (α=0.3) across-turn smoothing on turn-level feature summaries — `build_trajectory_features()` in cell 13.4
+- [x] Build on-the-fly SAE extraction pipeline (GPU) — cells 13.2-13.5: loads model+SAEs, extracts SWiM activations per turn, selects 435 features, computes Δ, applies EMA
+- [x] Implement trajectory-level dataset builder — cell 13.5: processes all trajectories, train/val split (80/20 stratified by trajectory-level hard label), saves to `results/mlp_detector/trajectory_dataset.pt`
+  - **Stratified split details:** Split at trajectory level (not turn level) to prevent data leakage. Hard label (`1 if max(scores) > 8 else 0`) used only for `sklearn.train_test_split(stratify=...)` to ensure both splits preserve the jailbroken/refused ratio. Soft labels (`score_t / 10`) remain the actual training targets — hard labels never enter the loss function.
+- [x] Implement softmax-weighted BCE loss — cell 13.7: `SoftmaxWeightedBCE` class, weights turns by `exp(score)` so critical transition turns dominate gradient
+- [x] Implement DecouplingMLP — cell 13.6: 435 → 64 → 32 → 1, ReLU + Dropout(0.2), sigmoid output
+- [x] Training loop with soft labels — cell 13.8: per-trajectory training, Adam lr=1e-3, early stopping (patience=10), saves best model
+- [x] Evaluation + Early Warning Latency — cell 13.9: sweep τ ∈ {0.3, 0.5, 0.7}, output EMA (α_out=0.5), training curves plot, D_t trajectory visualization
+- [ ] **Run cells 13.0-13.9** (pending GPU execution)
 - [ ] Compare soft-label vs. hard-label training
 - [ ] Tune EMA α, SWiM M, and threshold τ on validation set
 - [ ] **CC++ ablation (Figure 5b style):** Raw vs. mean-pool vs. SWiM-only vs. EMA-only vs. two-level smoothing
