@@ -986,18 +986,58 @@ with model.trace(prompt_t):
 - [x] Implement SWiM (M=16) within-turn token aggregation on selected SAE features (V-0.7: `swim_aggregate()`, `extract_sae_activations_swim()`, `iter_trajectory_activations_swim()`)
 - [x] Implement EMA (α=0.3) across-turn smoothing on turn-level feature summaries — `build_trajectory_features()` in cell 13.4
 - [x] Build on-the-fly SAE extraction pipeline (GPU) — cells 13.2-13.5: loads model+SAEs, extracts SWiM activations per turn, selects 435 features, computes Δ, applies EMA
+  - **Feature extraction pipeline (per turn → 435-dim vector):**
+    ```
+    Raw conversation turn
+      → NNSight forward pass (layers 9, 17, 22, 29)
+      → SAE encode (JumpReLU 65k)
+      → SWiM aggregate (M=16 token sliding window, max-pool)
+      → Select 435 features (F_H + F_S from Elastic Net)
+      → Compute Δ features (z_t - z_{t-1})
+      → Concatenate [raw | Δ]
+      → EMA smooth (α=0.3)
+      → Final: one 435-dim vector per turn
+    ```
 - [x] Implement trajectory-level dataset builder — cell 13.5: processes all trajectories, train/val split (80/20 stratified by trajectory-level hard label), saves to `results/mlp_detector/trajectory_dataset.pt`
   - **Stratified split details:** Split at trajectory level (not turn level) to prevent data leakage. Hard label (`1 if max(scores) > 8 else 0`) used only for `sklearn.train_test_split(stratify=...)` to ensure both splits preserve the jailbroken/refused ratio. Soft labels (`score_t / 10`) remain the actual training targets — hard labels never enter the loss function.
 - [x] Implement softmax-weighted BCE loss — cell 13.7: `SoftmaxWeightedBCE` class, weights turns by `exp(score)` so critical transition turns dominate gradient
 - [x] Implement DecouplingMLP — cell 13.6: 435 → 64 → 32 → 1, ReLU + Dropout(0.2), sigmoid output
-- [x] Training loop with soft labels — cell 13.8: per-trajectory training, Adam lr=1e-3, early stopping (patience=10), saves best model
+- [x] Training loop — cell 13.8: per-trajectory training, Adam lr=1e-3, early stopping (patience=10), Standard BCE loss (updated from softmax-weighted BCE based on ablation 13.11), saves best model
 - [x] Evaluation + Early Warning Latency — cell 13.9: sweep τ ∈ {0.3, 0.5, 0.7}, output EMA (α_out=0.5), training curves plot, D_t trajectory visualization
-- [ ] **Run cells 13.0-13.9** (pending GPU execution)
-- [ ] Compare soft-label vs. hard-label training
+  - **Key metrics explained:**
+    - **D_t** — MLP detector output for turn t, ∈ [0,1]. Measures decoupling probability (F_H active AND F_S suppressed). D_t≈0 = benign, D_t≈1 = jailbroken. Smoothed with output EMA (α_out=0.5) → D_t_smooth.
+    - **τ (threshold)** — D_t_smooth > τ triggers the alarm. Low τ = sensitive (more catches, more false alarms); high τ = conservative (fewer false alarms, more misses). Controls the precision–recall trade-off.
+    - **FPR (False Positive Rate)** — % of safe/refused trajectories incorrectly flagged as jailbroken.
+    - **Early Warning Latency** — `jb_turn − det_turn`. Positive = detector triggered before jailbreak; zero = same turn; negative = too late. Even latency=0 is useful because D_t is computed from internal activations before the response is generated.
+- [x] **Run cells 13.0-13.9** — completed 2026-03-08.
+  - **Baseline comparison (Softmax-weighted BCE → Standard BCE):**
+    | Metric | Old (Softmax BCE) | New (Standard BCE) |
+    |---|---|---|
+    | Best F1 | 0.758 (τ=0.5) | **0.846 (τ=0.3)** |
+    | Precision at best F1 | 0.643 | **0.846** |
+    | Recall at best F1 | 0.923 | 0.846 |
+    | FPR at best F1 | 0.714 | **0.214** |
+    | Early warning | +1.2 turns | +0.4 turns |
+  - **What improved:** F1 jumped 0.758→0.846 (best seen). FPR dropped 71.4%→21.4% — old model flagged almost every refused trajectory as jailbroken; new one rarely does. Precision jumped 0.643→0.846 — when it triggers, it's almost always correct.
+  - **What changed:** Standard BCE trains the model to care about ALL turns equally, so it outputs low D_t for benign turns and high D_t for jailbreak turns (better calibrated). The old softmax-weighted model was "trigger-happy" — high recall (1.0 at τ=0.3) but flagged everything, making it useless in practice.
+  - **The trade-off:** Early warning dropped +1.2→+0.4 turns. Expected — old model triggered early because it was over-sensitive (FPR=100% at τ=0.3). The new +0.4 is a *real* early warning, not a false alarm.
+  - **Optimal operating point:** τ=0.3 → P=0.846, R=0.846, F1=0.846, FPR=21.4%, early warning +0.4 turns.
+- [x] **Soft vs Hard label ablation** — **cell 13.10.1** (toggle: `RUN_ABLATION_LABEL`, multi-seed ×5). **Result:** Hard labels win all 5 seeds (AUC 0.884±0.008 vs 0.858±0.007, non-overlapping ±1σ). Acc: 0.770±0.021 vs 0.599±0.055. **Reason:** With only 5–8 turns per trajectory, soft labels (score/10) give ambiguous gradient — a turn scored 0.5 could be "halfway to jailbreak" or just noisy judging. Hard labels (0 or 1) give the MLP a clear binary signal that's easier to learn from with limited data. The accuracy gap (77% vs 60%) confirms soft-label models are poorly calibrated. Cell 13.8 already uses hard labels (`y_t = 1 if score > 8 else 0`).
+- [x] **Loss function ablation (soft-label only):** Standard BCE vs. softmax-weighted BCE — **cell 13.11** (toggle: `RUN_ABLATION_LOSS`, multi-seed ×5). **Result:** Standard BCE wins all 5 seeds (AUC 0.894±0.007 vs 0.858±0.007, non-overlapping ±1σ). Acc: 0.887±0.007 vs 0.599±0.055. **Reason:** CC++ softmax weighting helps for long token sequences where critical tokens are <5%, but our turn-level units are already semantically dense after SWiM aggregation — uniform weighting works better on 5–8 turn trajectories. Cell 13.8 updated to use Standard BCE.
+- [x] **2×2 Loss × Label factorial ablation** — **cell 13.10.2** (toggle: `RUN_ABLATION_LOSS`, multi-seed ×5, 20 total runs). Tests all 4 combinations of {Standard BCE, Softmax BCE} × {Soft labels, Hard labels}. **Results:**
+    | Variant | AUC mean | AUC std | Acc mean | Acc std |
+    |---|---|---|---|---|
+    | Softmax+Soft | 0.858 | 0.007 | 0.599 | 0.055 |
+    | Softmax+Hard | 0.884 | 0.008 | 0.770 | 0.021 |
+    | Standard+Soft | 0.894 | 0.007 | 0.887 | 0.007 |
+    | **Standard+Hard** | **0.915** | **0.012** | **0.899** | **0.010** |
+  - **Winner:** Standard+Hard wins all 5 seeds. Best AUC seen so far (0.915).
+  - **Both factors are additive and independent:** Hard > Soft regardless of loss function; Standard > Softmax regardless of label type. No interaction effect — each improvement stacks.
+  - **Ranking:** Standard+Hard (0.915) > Standard+Soft (0.894) > Softmax+Hard (0.884) > Softmax+Soft (0.858).
+  - **Confirms cell 13.8 defaults are optimal:** Standard BCE + hard labels.
 - [ ] Tune EMA α, SWiM M, and threshold τ on validation set
 - [ ] **CC++ ablation (Figure 5b style):** Raw vs. mean-pool vs. SWiM-only vs. EMA-only vs. two-level smoothing
 - [ ] **SWiM window ablation:** M ∈ {4, 8, 16, 32}
-- [ ] **Loss function ablation:** Standard BCE vs. soft-label MSE vs. softmax-weighted BCE
 - [ ] **Pooling ablation:** Max-pool vs. mean-pool vs. last-token over SWiM-smoothed sequence
 - [ ] Evaluate Early Warning Latency: compare MLP trigger turn vs. judge-score escalation turn
 
