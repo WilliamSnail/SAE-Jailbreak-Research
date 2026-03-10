@@ -1036,9 +1036,30 @@ with model.trace(prompt_t):
   - **Ranking:** Standard+Hard (0.915) > Standard+Soft (0.894) > Softmax+Hard (0.884) > Softmax+Soft (0.858).
   - **Confirms cell 13.8 defaults are optimal:** Standard BCE + hard labels.
 - [ ] Tune EMA α, SWiM M, and threshold τ on validation set
-- [ ] **CC++ ablation (Figure 5b style):** Raw vs. mean-pool vs. SWiM-only vs. EMA-only vs. two-level smoothing
-- [ ] **SWiM window ablation:** M ∈ {4, 8, 16, 32}
-- [ ] **Pooling ablation:** Max-pool vs. mean-pool vs. last-token over SWiM-smoothed sequence
+- [ ] **Two-level smoothing ablation (CC++ inspired)** — **cell 13.10.3** (toggle: `RUN_ABLATION_SMOOTHING`, multi-seed ×5).
+  - **CC++ vs. our architecture — key distinction:** CC++ uses SWiM and EMA as **alternatives** for the same job (token-level smoothing within a single generation): SWiM during training, EMA at inference for computational convenience (stores 1 scalar vs. M-token buffer). They are never stacked. Our system **stacks** them for different jobs at different timescales:
+    - **SWiM (within-turn):** e.g. 160 tokens → sliding window M=16 → 145 smoothed vectors → max-pool → 1 vector per turn. Collapses sparse token-level SAE activations into a dense turn summary.
+    - **Input EMA (across-turn):** Smooths the 435-dim feature vector across turns (α=0.3, ~3-turn memory). Captures gradual safety erosion drift.
+    - **Output EMA (post-MLP):** Smooths D_t predictions across turns (α=0.5). Reduces noisy per-turn predictions.
+    - This two-level architecture is a **novel extension** of CC++ — CC++ doesn't address multi-turn conversations.
+  - **5 variants** (MLP architecture + Standard BCE + hard labels held constant):
+    | # | Variant | Within-turn | Across-turn | What it isolates |
+    |---|---|---|---|---|
+    | 1 | Raw | Last token only | None | Baseline — no smoothing at any level |
+    | 2 | Mean-pool | Mean over all tokens | None | Does any within-turn aggregation help? |
+    | 3 | SWiM-only | SWiM(M=16) + max-pool | None | Does SWiM beat naive mean-pool? |
+    | 4 | EMA-only | Last token only | Input EMA (α=0.3) | Does cross-turn memory alone help? |
+    | 5 | Two-level | SWiM(M=16) + max-pool | Input EMA (α=0.3) | Current default — both levels stacked |
+  - **Output EMA** (on D_t) held constant across all variants — it's a post-hoc inference trick, not part of feature construction. Can be ablated separately.
+  - **Key comparisons:**
+    - (3) vs (2): SWiM sliding window matters, or naive averaging suffices?
+    - (5) vs (3): EMA adds value on top of SWiM?
+    - (4) vs (1): Cross-turn memory alone helps without good within-turn features?
+    - (5) vs (4): SWiM adds value on top of EMA?
+    - If (5) > all others: both levels needed → validates our two-level extension of CC++
+  - **Implementation note:** Variants 1–4 require re-extracting features with different aggregation. Most efficient: extract raw token-level activations once per turn, then apply all 5 aggregation strategies in a single pass to avoid repeated GPU forward passes.
+- [ ] **SWiM window ablation:** M ∈ {4, 8, 16, 32} — **cell 13.10.4** (toggle: `RUN_ABLATION_SWIM_M`, multi-seed ×5). Tests window size sensitivity within the SWiM-only or Two-level variant.
+- [ ] **Pooling ablation:** Max-pool vs. mean-pool vs. last-token over SWiM-smoothed sequence — **cell 13.10.5** (toggle: `RUN_ABLATION_POOL`, multi-seed ×5).
 - [ ] Evaluate Early Warning Latency: compare MLP trigger turn vs. judge-score escalation turn
 
 ### Phase 4 — Intervention
