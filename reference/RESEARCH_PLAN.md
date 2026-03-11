@@ -717,17 +717,25 @@ Saved to `results/feature_discovery/` for Phase 3:
 For each turn `t`, apply a sliding window mean over the response tokens to convert sparse per-token SAE activations into a continuous "concept intensity" signal:
 
 ```
-For each selected feature i in F_H ∪ F_S:
-    raw_tokens = [z_i^(1), z_i^(2), ..., z_i^(T)]     # per-token activations within turn t
+For each layer L and its (seq_len, d_sae) activation tensor:
 
-    swim_i^(k) = (1/M) * Σ_{j=0}^{M-1} z_i^(k-j)      # SWiM with M=16 tokens
+    Step 1 — Sliding window mean:
+    swim^(k) = (1/M) * Σ_{j=0}^{M-1} z^(k-j)           # (seq_len, d_sae) → (seq_len-M+1, d_sae)
+    # e.g., 160 tokens with M=16 → 145 smoothed vectors
 
-    A(f_i)_t = max_k(swim_i^(k))                        # take peak smoothed activation as turn-level summary
+    Step 2 — Pooling:
+    A(f)_t = max_k(swim^(k))                             # (seq_len-M+1, d_sae) → (d_sae,)
+    # max-pool across all window positions → one vector per layer per turn
+
+    Step 3 — Feature selection:
+    ψ_t[i] = A(f)_t[sae_idx]                             # index into 435 selected features
 ```
+
+**Note:** The sliding window alone does NOT collapse to a single vector — it produces `seq_len − M + 1` smoothed vectors. The pooling step (max-pool or mean-pool) is what reduces to one `(d_sae,)` vector per layer. This is why the pooling method matters and is ablated in cell 13.10.5.
 
 **Why M=16:** CC++ Figure 5b shows M=16 achieves the lowest ASR in their ablation. Responses are ~100–500 tokens, so M=16 provides local smoothing without washing out the signal. The max-pool over the smoothed sequence captures the peak "concept intensity" within the turn.
 
-**Alternative aggregation:** Mean-pool over `swim_i^(k)` instead of max-pool — compare in ablation (Section 8.3).
+**Alternative aggregation:** Mean-pool over `swim^(k)` instead of max-pool — compare in ablation (cell 13.10.5).
 
 #### Level 2: Across-Turn EMA Smoothing
 
@@ -843,42 +851,207 @@ A positive latency means the detector triggers before the model outputs harmful 
 
 ---
 
-## 7. Phase 4 — Conditional Sparse Clamping Intervention (Status: Not Started)
+## 7. Phase 4 — Data-Driven Feature Attribution & Conditional Intervention (Status: In Progress)
 
-### 7.1 Trigger Condition
+### 7.0 Motivation: Why the Layer-Based F_H/F_S Split Is Insufficient
+
+In Phases 2–3, features were categorized as F_H (harmful activation) or F_S (safety erosion) based on **layer position**:
+- Layers 9, 17 → F_H (202 features)
+- Layers 22, 29 → F_S (233 features)
+
+This is a heuristic assumption — it presumes that early layers encode harmful content and late layers encode safety behavior. In reality:
+- A layer-29 feature could track harmful content (e.g., violent semantics decoded late)
+- A layer-9 feature could encode safety-relevant signals (e.g., refusal planning)
+- The MLP treats all 435 features as a flat input — it doesn't know or care about the layer-based labels
+
+**Problem for intervention:** The original plan assumed "clamp F_S back to refusal levels." But if the MLP's detection is actually driven by F_H escalation (not F_S suppression), then restoring F_S alone won't prevent jailbreaking. We need to know **which features actually drift and in which direction** before designing the intervention.
+
+**Solution:** Reclassify all 435 features empirically by their **trajectory drift behavior** — how each feature's activation changes as judge scores escalate across turns in jailbroken conversations. This is layer-agnostic, data-driven, and directly informs what to intervene on.
+
+### 7.1 Data-Driven Feature Drift Analysis (Section 14, Cells 14.0–14.8)
+
+#### 7.1.1 Feature Drift Computation (Cells 14.5–14.6) — COMPLETED
+
+For each of the 435 Elastic Net features, computed **drift direction** across 192 jailbroken trajectories:
+
+**Method A — Pearson correlation with judge score**
+**Method B — Early vs. late turn mean shift (score < 3 vs score > 7)**
+
+Both methods achieved 100% agreement on direction.
+
+**Results on the 435 Elastic Net features (θ = 0.10):**
+
+| Category | Count | % | Interpretation |
+|---|---|---|---|
+| F_H (escalating, corr > +0.10) | 309 | 71.0% | Activate more as attack succeeds |
+| F_S (eroding, corr < -0.10) | 3 | 0.7% | Suppressed as attack succeeds |
+| Neutral (|corr| < 0.10) | 123 | 28.3% | No clear trend |
+
+**Threshold sensitivity sweep:**
+
+| θ | F_H | F_S | Neutral |
+|---|---|---|---|
+| 0.05 | 427 | 3 | 5 |
+| 0.10 | 309 | 3 | 123 |
+| 0.15 | 172 | 2 | 261 |
+| 0.20 | 97 | 0 | 338 |
+| 0.25 | 42 | 0 | 393 |
+| 0.30 | 4 | 0 | 431 |
+
+**Cross-tabulation with old layer-based assignment:**
+- 153 / 233 old-F_S features (layers 22, 29) are actually **escalating** (reclassified as F_H)
+- Only 1 old-F_H feature is eroding; the layer-based heuristic was fundamentally wrong
+
+**Initial (incorrect) interpretation:** Jailbreaking is driven entirely by F_H escalation with negligible safety erosion. **This was later overturned by the full d_sae analysis (see 7.1.4).**
+
+#### 7.1.2 MLP Gradient Attribution (Cell 14.6) — COMPLETED
+
+Computed `∂D_t/∂input × input` (signed attribution) for 481 turns where D_t > 0.3:
+
+**Key findings:**
+- **Feature #10 (layer 17, SAE 963) dominates** — |attr| = 0.164, 3× larger than the next feature (0.055). The MLP disproportionately relies on this single feature.
+- Most top features have **negative signed attribution** despite being F_H (escalating). The MLP learned a suppressive/inhibitory relationship — non-linear interactions (ReLU boundaries) create sign flips.
+- Cross-reference with drift produces 4 quadrants:
+
+| | High MLP importance | Low MLP importance |
+|---|---|---|
+| **High drift** | **180 causal drivers** | 132 drift-ignored |
+| **Low drift** | 37 static-relied | 86 neither |
+
+The 180 causal drivers (41% of features) are the validated intervention targets for the current MLP.
+
+#### 7.1.3 Feature Group Ablation (Cell 14.7) — COMPLETED
+
+Zero-out ablation experiments on all 2,135 turns (1,023 jailbroken, 1,112 refused):
+
+| Experiment | #Active | AUC | ΔAUC |
+|---|---|---|---|
+| A. Full model (baseline) | 435 | 0.694 | — |
+| B. Data-driven F_H only | 309 | 0.706 | +0.012 |
+| C. Data-driven F_S only | 3 | 0.479 | -0.215 |
+| D. Neutral removed | 312 | 0.675 | -0.019 |
+| E. Causal drivers only | 180 | 0.672 | -0.021 |
+| F. Old layer-based F_H only | 202 | 0.699 | +0.005 |
+| G. Old layer-based F_S only | 233 | 0.665 | -0.029 |
+| H. Strict F_H (θ=0.20) | 97 | 0.633 | -0.060 |
+
+**Key findings:**
+- **F_H dominates detection** — F_H-only (B) actually *beats* baseline; F_S-only (C) is below random
+- **Data-driven F_H (B, 0.706) > Old layer-based F_H (F, 0.699)** — data-driven split is more informative
+- Old F_S (G, 0.665) was decent because 153/233 old-F_S features are actually escalating (misclassified F_H)
+- **180 causal drivers retain 96.9% of AUC** — efficient subset for intervention
+
+**Note on turn-level AUC = 0.69 vs Phase 3 trajectory-level AUC = 0.96:** The ablation uses per-turn binary labels inherited from the trajectory label. Early turns in jailbroken trajectories are correctly predicted as low-risk by the MLP but labeled as "jailbroken" here, deflating AUC. Relative comparisons remain valid.
+
+#### 7.1.4 Full d_sae Drift Analysis (Cell 14.8) — COMPLETED — CRITICAL FINDING
+
+**The near-absence of F_S in the 435-feature set was an Elastic Net artifact.**
+
+Ran Pearson correlation on the full pre-Elastic-Net feature matrix (524,288 features from `feature_matrix.npz`, 2,135 × 524,288). Computation took 1.1s (vectorized CPU).
+
+**Full d_sae results at θ = 0.10:**
+
+| | F_H | F_S | Ratio |
+|---|---|---|---|
+| 435-feature (Elastic Net) | 309 | 3 | 103:1 |
+| Full d_sae (524,288) | 32,948 | 19,728 | **1.7:1** |
+
+**There are 19,728 eroding features in the full SAE space.** The true F_H:F_S ratio is 1.7:1 — safety erosion IS real and substantial.
+
+**Why Elastic Net killed F_S:**
+1. **Collinearity** — 19,728 F_S features are highly correlated; L1 picks one representative and zeros the rest. With far more candidates moving in the same direction, Elastic Net retains very few.
+2. **Asymmetric signal strength** — strongest F_H corr = +0.358 vs strongest F_S corr = -0.284. F_H features are slightly stronger individually, so Elastic Net prefers them under L1 sparsity.
+3. **L1 bias** — predicting high score is easier with positively-correlated features. Negative-coefficient features compete at a disadvantage when the regularization budget is limited.
+
+**Top F_S features are strong and ALL missed by Elastic Net:**
+- Top-30 F_S correlations range from -0.284 to -0.236 (comparable to top F_H)
+- 29 of 30 were NOT in the 435 selection
+- Top-30 F_H features: 0 of 30 were in the 435 selection (Elastic Net selected different F_H features)
+
+**Per-layer distribution (at θ = 0.10):**
+
+| Layer | F_H (raw+delta) | F_S (raw+delta) | F_H:F_S |
+|---|---|---|---|
+| 9 (early) | 12,693 | 6,068 | 2.1:1 |
+| 17 (early) | 14,108 | 6,488 | 2.2:1 |
+| 22 (late) | 2,899 | 3,514 | **0.8:1** |
+| 29 (late) | 3,248 | 3,658 | **0.9:1** |
+
+Late layers (22, 29) have **more F_S than F_H** — the original layer-based heuristic (late = safety) had partial truth, but Elastic Net erased this signal.
+
+**Full d_sae correlation distribution:**
+- Mean: +0.015, Std: 0.067, Max: +0.358, Min: -0.284
+- Slight positive skew (more escalating features), but F_S is a substantial minority
+
+### 7.1.5 Implications for Project Direction
+
+**The current MLP detector is built on a biased feature set.** It was trained on 435 features that are 103:1 F_H-biased, so it learned to detect jailbreaks using only harmful content escalation. It never saw the 19,728 F_S features.
+
+**Two paths forward for intervention:**
+
+**Path A — Quick (F_H-only suppression with current MLP):**
+- Use the 180 causal drivers from the current MLP
+- Intervene by suppressing escalating features toward benign baselines
+- Limitation: ignores safety erosion entirely; intervention is one-sided
+
+**Path B — Thorough (balanced feature re-selection + MLP retrain):**
+- Select top-N F_H + top-N F_S features from the full d_sae by drift correlation magnitude (bypassing Elastic Net)
+- Retrain the MLP on this balanced feature set
+- Design combined intervention (F_H suppression + F_S restoration = Scenario C)
+- This is more principled and directly tests the "causal decoupling" thesis
+
+**Recommendation:** Path B. The finding that safety erosion is real but was masked by feature selection is itself a significant result for the thesis — it shows the importance of feature selection methodology in mechanistic interpretability research.
+
+### 7.2 Intervention Design (Informed by 7.1 Results)
+
+**Confirmed scenario: Scenario C — Both F_H escalation and F_S erosion contribute.**
+
+The full d_sae analysis (7.1.4) shows F_H:F_S ratio of 1.7:1 in the raw feature space. Both mechanisms are active during jailbreaking. The intervention must address both:
+
+**F_H suppression:** Suppress escalating features toward their benign baseline.
+- Subtract-only: `Δ_i = Baseline_Value - current` only when `current > Baseline_Value`
+- Baseline values = mean activation during benign early turns (score < 2)
+
+**F_S restoration:** Clamp eroding features back to their refusal-level target values.
+- Add-only: `Δ_i = Target_Value - current` only when `current < Target_Value`
+- Target values = mean activation during robust refusals (score < 2)
+
+**Ablation:** F_S-only restoration vs F_H-only suppression vs combined, to measure each mechanism's contribution to ASR reduction.
+
+#### 7.2.1 Trigger Condition
 
 Activate intervention at turn `t` only when:
 
 ```
-D_t_smooth > τ
+D_t > τ
 ```
 
-For benign prompts, `D_t_smooth` stays near 0 → zero intervention → zero capability cost.
+where `D_t` is the raw MLP output (no output EMA — ablation 13.10.3 showed α_out=1.0 is best). For benign prompts, `D_t` stays near 0 → zero intervention → zero capability cost.
 
-### 7.2 The Add-Only Constraint
+**Threshold:** τ=0.4 (best F1=0.949) or τ=0.6 (zero FPR) from Phase 3 sweep.
 
-When triggered, compute a correction delta for each selected F_S feature `i`:
+**Note:** If Path B (MLP retrain) is taken, the MLP and thresholds will need recalibration on the new feature set.
 
-```
-Δ_i = Target_Value - A(F_S_i)_current
-```
+#### 7.2.2 Residual Stream Injection via SAE Decoder
 
-Where `Target_Value` is the mean activation of feature `i` observed during robust refusals (computed from training data).
-
-**Inject into residual stream:**
+When triggered, decode the feature-level correction through the SAE decoder to get a residual stream correction:
 
 ```python
 with model.trace(prompt_t):
-    h_late = model.model.layers[LATE_LAYER].output[0]
+    h = model.model.layers[INTERVENTION_LAYER].output[0]
 
-    # Decode correction through SAE decoder
-    correction = sum(Δ_i * sae_late.W_dec[F_S_i] for i in F_S)
+    # Compute per-feature correction deltas
+    for i in intervention_features:
+        delta_i = target_values[i] - current_activation[i]
+        # Add-only (F_S) or subtract-only (F_H) constraint
+        if should_apply(delta_i, feature_type[i]):
+            correction += delta_i * sae.W_dec[sae_idx[i]]
 
-    # Add-only: only inject if feature is currently suppressed
-    h_late[:, :, :] += correction * (D_t_smooth > τ)
+    h[:, :, :] += correction
 ```
 
-**Add-only semantics:** The correction is only injected if `A(F_S_i)_current < Target_Value` — it *restores* the refusal signal without over-amplifying it on prompts where refusal is already active.
+**Add-only semantics for F_S:** Only inject if `current < target` (feature is suppressed below refusal level).
+**Subtract-only semantics for F_H:** Only inject if `current > baseline` (feature is elevated above benign level).
 
 ### 7.3 Baselines to Compare Against
 
@@ -886,8 +1059,33 @@ with model.trace(prompt_t):
 |---|---|---|
 | No intervention | Baseline model | High ASR on multi-turn attacks |
 | Static feature clamping | Always clamp F_H to 0 | Degrades MMLU/GSM8K |
+| F_S-only restoration | Only restore eroding features | Tests F_S contribution alone |
+| F_H-only suppression | Only suppress escalating features | Tests F_H contribution alone |
 | Dense projection cap ("Assistant Axis") | Cap activation magnitude on assistant axis | Blunt instrument, some over-refusal |
-| **This method** | Conditional Sparse Clamping, add-only, triggered by MLP | Hypothesis: best safety/utility trade-off |
+| **This method** | Data-driven conditional clamping (F_H↓ + F_S↑), triggered by MLP | Hypothesis: best safety/utility trade-off |
+
+### 7.4 Notebook Structure (Section 14)
+
+| Cell | ID | Content | Status |
+|------|-----|---------|--------|
+| 14.0 | Clean up | Delete all globals, `gc.collect()`, `torch.cuda.empty_cache()` | Done |
+| 14.1 | Config | Imports, model config, load `feature_sets.json`, load trained MLP weights | Done |
+| 14.2 | Trajectory statistics | Per-file, per-category ASR, avg turns, score distributions | Done |
+| 14.3 | Load models | NNSight LanguageModel + SAEs for layers [9, 17, 22, 29] | Done (skipped via toggle) |
+| 14.4 | Extract features | SWiM extraction with `USE_SAVED_DATASET` toggle (loads Phase 3 data) | Done |
+| 14.5 | **Feature drift analysis** | Per-feature Pearson correlation, early-vs-late delta, reclassify 435 features | Done |
+| 14.6 | **Threshold sweep + MLP gradient attribution** | Sweep θ ∈ [0.05, 0.30]; ∂D_t/∂input for high-D_t turns; cross-reference drift × importance | Done |
+| 14.7 | **Feature group ablation** | 8 zero-out experiments; data-driven vs layer-based comparison | Done |
+| 14.8 | **Full d_sae drift analysis** | Pearson correlation on all 524,288 features from `feature_matrix.npz`; proves F_S exists but was filtered by Elastic Net | Done |
+| 14.9 | **Balanced feature re-selection** | Select top-N F_H + top-N F_S from full d_sae by |corr|; create new balanced feature set | TODO |
+| 14.10 | **Retrain MLP on balanced features** | New MLP with F_H + F_S features; compare AUC vs old MLP | TODO |
+| 14.11 | **Compute intervention targets** | Mean F_S activation during refusals, mean F_H activation during benign turns | TODO |
+| 14.12 | **Implement intervention hook** | NNSight hook with data-driven F_H/F_S clamping, triggered by D_t > τ | TODO |
+| 14.13 | **Run intervention evaluation** | Re-run attacks with hook active, judge-score per turn, measure ASR reduction | TODO |
+| 14.14 | **Utility evaluation** | XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts | TODO |
+| 14.15 | **Results & comparison** | Compare all baselines, plot score trajectory suppression | TODO |
+
+**Output directory:** `results/intervention/`
 
 ---
 
@@ -990,20 +1188,21 @@ with model.trace(prompt_t):
     ```
     Raw conversation turn
       → NNSight forward pass (layers 9, 17, 22, 29)
-      → SAE encode (JumpReLU 65k)
-      → SWiM aggregate (M=16 token sliding window, max-pool)
+      → SAE encode (JumpReLU 65k)           → (seq_len, d_sae) per layer
+      → SWiM sliding window (M=16)          → (seq_len-15, d_sae) per layer
+      → Max-pool across window positions    → (d_sae,) per layer
       → Select 435 features (F_H + F_S from Elastic Net)
       → Compute Δ features (z_t - z_{t-1})
       → Concatenate [raw | Δ]
-      → EMA smooth (α=0.3)
       → Final: one 435-dim vector per turn
     ```
+    **Note:** Input EMA (α=0.3) was removed from the default pipeline based on ablation 13.10.3 results — SWiM-only (AUC 0.974) outperforms Two-level with EMA (AUC 0.915).
 - [x] Implement trajectory-level dataset builder — cell 13.5: processes all trajectories, train/val split (80/20 stratified by trajectory-level hard label), saves to `results/mlp_detector/trajectory_dataset.pt`
   - **Stratified split details:** Split at trajectory level (not turn level) to prevent data leakage. Hard label (`1 if max(scores) > 8 else 0`) used only for `sklearn.train_test_split(stratify=...)` to ensure both splits preserve the jailbroken/refused ratio. Soft labels (`score_t / 10`) remain the actual training targets — hard labels never enter the loss function.
 - [x] Implement softmax-weighted BCE loss — cell 13.7: `SoftmaxWeightedBCE` class, weights turns by `exp(score)` so critical transition turns dominate gradient
 - [x] Implement DecouplingMLP — cell 13.6: 435 → 64 → 32 → 1, ReLU + Dropout(0.2), sigmoid output
 - [x] Training loop — cell 13.8: per-trajectory training, Adam lr=1e-3, early stopping (patience=10), Standard BCE loss (updated from softmax-weighted BCE based on ablation 13.11), saves best model
-- [x] Evaluation + Early Warning Latency — cell 13.9: sweep τ ∈ {0.3, 0.5, 0.7}, output EMA (α_out=0.5), training curves plot, D_t trajectory visualization
+- [x] Evaluation + Early Warning Latency — cell 13.9: sweep α_out ∈ {1.0, 0.7, 0.5, 0.3} × τ ∈ {0.1–0.8}, training curves plot, D_t trajectory visualization
   - **Key metrics explained:**
     - **D_t** — MLP detector output for turn t, ∈ [0,1]. Measures decoupling probability (F_H active AND F_S suppressed). D_t≈0 = benign, D_t≈1 = jailbroken. Smoothed with output EMA (α_out=0.5) → D_t_smooth.
     - **τ (threshold)** — D_t_smooth > τ triggers the alarm. Low τ = sensitive (more catches, more false alarms); high τ = conservative (fewer false alarms, more misses). Controls the precision–recall trade-off.
@@ -1022,6 +1221,17 @@ with model.trace(prompt_t):
   - **What changed:** Standard BCE trains the model to care about ALL turns equally, so it outputs low D_t for benign turns and high D_t for jailbreak turns (better calibrated). The old softmax-weighted model was "trigger-happy" — high recall (1.0 at τ=0.3) but flagged everything, making it useless in practice.
   - **The trade-off:** Early warning dropped +1.2→+0.4 turns. Expected — old model triggered early because it was over-sensitive (FPR=100% at τ=0.3). The new +0.4 is a *real* early warning, not a false alarm.
   - **Optimal operating point:** τ=0.3 → P=0.846, R=0.846, F1=0.846, FPR=21.4%, early warning +0.4 turns.
+- [x] **Re-run cells 13.5-13.9 with SWiM-only** (input EMA OFF) — completed 2026-03-11.
+  - **SWiM-only vs Two-level baseline (single seed):**
+    | τ | Precision | Recall | F1 | FPR | Early Warning |
+    |---|---|---|---|---|---|
+    | **0.3 (SWiM-only)** | **0.923** | **0.923** | **0.923** | **0.107** | **+0.6 turns** |
+    | 0.3 (old, EMA ON) | 0.846 | 0.846 | 0.846 | 0.214 | +0.4 turns |
+    | **0.5 (SWiM-only)** | **1.000** | 0.744 | 0.853 | **0.000** | −0.2 turns |
+    | **0.7 (SWiM-only)** | **1.000** | 0.154 | 0.267 | **0.000** | +0.2 turns |
+  - **Key improvements:** F1 +0.077 (0.846→0.923), FPR halved (21.4%→10.7%), early warning +0.2 turns. At τ=0.5 precision is perfect with zero false positives.
+  - **Training:** AUC=0.942, acc=0.930, best epoch 20 (early stop at 30). Single seed — ablation 13.10.3 showed 5-seed mean AUC=0.974±0.008 for SWiM-only.
+  - **Confirms ablation finding:** Removing input EMA gives the MLP cleaner per-turn features, improving both precision and recall. SWiM-only is now the default pipeline.
 - [x] **Soft vs Hard label ablation** — **cell 13.10.1** (toggle: `RUN_ABLATION_LABEL`, multi-seed ×5). **Result:** Hard labels win all 5 seeds (AUC 0.884±0.008 vs 0.858±0.007, non-overlapping ±1σ). Acc: 0.770±0.021 vs 0.599±0.055. **Reason:** With only 5–8 turns per trajectory, soft labels (score/10) give ambiguous gradient — a turn scored 0.5 could be "halfway to jailbreak" or just noisy judging. Hard labels (0 or 1) give the MLP a clear binary signal that's easier to learn from with limited data. The accuracy gap (77% vs 60%) confirms soft-label models are poorly calibrated. Cell 13.8 already uses hard labels (`y_t = 1 if score > 8 else 0`).
 - [x] **Loss function ablation (soft-label only):** Standard BCE vs. softmax-weighted BCE — **cell 13.11** (toggle: `RUN_ABLATION_LOSS`, multi-seed ×5). **Result:** Standard BCE wins all 5 seeds (AUC 0.894±0.007 vs 0.858±0.007, non-overlapping ±1σ). Acc: 0.887±0.007 vs 0.599±0.055. **Reason:** CC++ softmax weighting helps for long token sequences where critical tokens are <5%, but our turn-level units are already semantically dense after SWiM aggregation — uniform weighting works better on 5–8 turn trajectories. Cell 13.8 updated to use Standard BCE.
 - [x] **2×2 Loss × Label factorial ablation** — **cell 13.10.2** (toggle: `RUN_ABLATION_LOSS`, multi-seed ×5, 20 total runs). Tests all 4 combinations of {Standard BCE, Softmax BCE} × {Soft labels, Hard labels}. **Results:**
@@ -1036,9 +1246,12 @@ with model.trace(prompt_t):
   - **Ranking:** Standard+Hard (0.915) > Standard+Soft (0.894) > Softmax+Hard (0.884) > Softmax+Soft (0.858).
   - **Confirms cell 13.8 defaults are optimal:** Standard BCE + hard labels.
 - [ ] Tune EMA α, SWiM M, and threshold τ on validation set
-- [ ] **Two-level smoothing ablation (CC++ inspired)** — **cell 13.10.3** (toggle: `RUN_ABLATION_SMOOTHING`, multi-seed ×5).
+- [x] **Two-level smoothing ablation (CC++ inspired)** — **cell 13.10.3** (toggle: `RUN_ABLATION_SMOOTHING`, multi-seed ×5).
   - **CC++ vs. our architecture — key distinction:** CC++ uses SWiM and EMA as **alternatives** for the same job (token-level smoothing within a single generation): SWiM during training, EMA at inference for computational convenience (stores 1 scalar vs. M-token buffer). They are never stacked. Our system **stacks** them for different jobs at different timescales:
-    - **SWiM (within-turn):** e.g. 160 tokens → sliding window M=16 → 145 smoothed vectors → max-pool → 1 vector per turn. Collapses sparse token-level SAE activations into a dense turn summary.
+    - **SWiM (within-turn):** Two-step process:
+      1. **Sliding window mean:** `(seq_len, d_sae) → (seq_len − M + 1, d_sae)` — e.g. 160 tokens with M=16 → 145 smoothed vectors. Each vector is the mean of M consecutive token activations. This converts sparse per-token SAE spikes into locally smoothed signals.
+      2. **Pooling:** `(seq_len − M + 1, d_sae) → (d_sae,)` — max-pool (default) or mean-pool collapses all window positions into a single vector per layer. This is the step that reduces to one vector per turn.
+      - The pooling method is the subject of ablation 13.10.5.
     - **Input EMA (across-turn):** Smooths the 435-dim feature vector across turns (α=0.3, ~3-turn memory). Captures gradual safety erosion drift.
     - **Output EMA (post-MLP):** Smooths D_t predictions across turns (α=0.5). Reduces noisy per-turn predictions.
     - This two-level architecture is a **novel extension** of CC++ — CC++ doesn't address multi-turn conversations.
@@ -1051,23 +1264,66 @@ with model.trace(prompt_t):
     | 4 | EMA-only | Last token only | Input EMA (α=0.3) | Does cross-turn memory alone help? |
     | 5 | Two-level | SWiM(M=16) + max-pool | Input EMA (α=0.3) | Current default — both levels stacked |
   - **Output EMA** (on D_t) held constant across all variants — it's a post-hoc inference trick, not part of feature construction. Can be ablated separately.
-  - **Key comparisons:**
-    - (3) vs (2): SWiM sliding window matters, or naive averaging suffices?
-    - (5) vs (3): EMA adds value on top of SWiM?
-    - (4) vs (1): Cross-turn memory alone helps without good within-turn features?
-    - (5) vs (4): SWiM adds value on top of EMA?
-    - If (5) > all others: both levels needed → validates our two-level extension of CC++
   - **Implementation note:** Variants 1–4 require re-extracting features with different aggregation. Most efficient: extract raw token-level activations once per turn, then apply all 5 aggregation strategies in a single pass to avoid repeated GPU forward passes.
+  - **Results (5 seeds):**
+    | Variant | AUC mean | AUC std | Acc mean | Acc std |
+    |---|---|---|---|---|
+    | Raw | 0.614 | 0.015 | 0.865 | 0.001 |
+    | Mean-pool | 0.872 | 0.014 | 0.874 | 0.005 |
+    | **SWiM-only** | **0.974** | **0.008** | **0.941** | **0.008** |
+    | EMA-only | 0.654 | 0.016 | 0.866 | 0.001 |
+    | Two-level | 0.915 | 0.012 | 0.899 | 0.010 |
+  - **Winner:** SWiM-only wins all 5 seeds (AUC 0.974±0.008). Best AUC seen so far.
+  - **Key comparisons:**
+    - SWiM-only vs Mean-pool: ΔAUC = +0.102 → SWiM sliding window matters significantly over naive averaging
+    - **Two-level vs SWiM-only: ΔAUC = −0.058 → Input EMA *hurts* when added on top of SWiM** (likely significant, non-overlapping ±1σ)
+    - EMA-only vs Raw: ΔAUC = +0.040 → Cross-turn memory alone is nearly useless without good within-turn features
+    - Two-level vs EMA-only: ΔAUC = +0.262 → SWiM adds massive value on top of EMA
+  - **Interpretation:** Within-turn aggregation (SWiM) is the dominant factor. The across-turn input EMA (α=0.3) over-smooths with only 5–8 turns per trajectory, blurring the critical transition turn by blending it with stale past-turn features. The MLP can learn temporal patterns from the sequence of per-turn SWiM features directly — it doesn't need pre-smoothed input.
+  - **Action (done):** Cell 13.4/13.5 default switched from Two-level to SWiM-only (input EMA disabled via `USE_INPUT_EMA = False`). The "two-level extension of CC++" thesis claim needs revision — SWiM within-turn is the key contribution, not the stacking. Output EMA (post-MLP) ablated separately — see below.
+- [x] **Output EMA ablation (α_out × τ sweep)** — cell 13.9 updated to sweep α_out ∈ {1.0, 0.7, 0.5, 0.3} × τ ∈ {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}. Single seed, same trained model, post-hoc evaluation only.
+  - **Full results (α_out=1.0 = no output smoothing, raw D_t):**
+    | α_out | τ | P | R | F1 | FPR | Early Warning |
+    |---|---|---|---|---|---|---|
+    | **1.0** | 0.3 | 0.787 | 0.949 | 0.860 | 0.357 | **+1.0 turns** |
+    | **1.0** | **0.4** | **0.949** | **0.949** | **0.949** | **0.071** | **+0.6 turns** |
+    | **1.0** | 0.5 | 0.971 | 0.872 | 0.919 | 0.036 | +0.4 turns |
+    | **1.0** | 0.6 | 1.000 | 0.846 | 0.917 | 0.000 | +0.1 turns |
+    | 0.7 | 0.3 | 0.902 | 0.949 | 0.925 | 0.143 | +0.8 turns |
+    | 0.7 | 0.4 | 0.972 | 0.897 | 0.933 | 0.036 | +0.4 turns |
+    | 0.5 | 0.3 | 0.923 | 0.923 | 0.923 | 0.107 | +0.6 turns |
+    | 0.3 | 0.3 | 1.000 | 0.846 | 0.917 | 0.000 | +0.2 turns |
+  - **Best operating points by use case:**
+    | Use case | α_out | τ | F1 | FPR | Early Warning |
+    |---|---|---|---|---|---|
+    | **Best F1 overall** | 1.0 (none) | 0.4 | **0.949** | 0.071 | +0.6 turns |
+    | **Best early warning** | 1.0 (none) | 0.3 | 0.860 | 0.357 | **+1.0 turns** |
+    | **Zero FPR + best F1** | 1.0 (none) | 0.6 | 0.917 | **0.000** | +0.1 turns |
+    | Previous default | 0.5 | 0.3 | 0.923 | 0.107 | +0.6 turns |
+  - **Key findings:**
+    - **No output smoothing (α_out=1.0) is best.** At τ=0.4 it hits F1=0.949 — the best seen so far — with only 7.1% FPR and +0.6 turns early warning. Raw D_t is already clean enough after SWiM aggregation.
+    - **Output EMA hurts more than it helps.** It suppresses recall without improving precision meaningfully. At α_out=0.3/τ=0.3, recall drops to 0.846 vs 0.949 at α_out=1.0/τ=0.3.
+    - **τ=0.4 with no smoothing is the sweet spot** — 94.9% precision AND recall, catches jailbreaks 0.6 turns early, only 2 false positives out of 28 safe trajectories.
+    - **For maximum early warning**, τ=0.3 with no smoothing gives +1.0 turns but at the cost of 35.7% FPR.
+  - **Action:** Cell 13.1 default should be updated to `EMA_ALPHA_OUT = 1.0`. Cell 13.9 plot uses `EMA_ALPHA_OUT` for the trajectory visualization.
 - [ ] **SWiM window ablation:** M ∈ {4, 8, 16, 32} — **cell 13.10.4** (toggle: `RUN_ABLATION_SWIM_M`, multi-seed ×5). Tests window size sensitivity within the SWiM-only or Two-level variant.
 - [ ] **Pooling ablation:** Max-pool vs. mean-pool vs. last-token over SWiM-smoothed sequence — **cell 13.10.5** (toggle: `RUN_ABLATION_POOL`, multi-seed ×5).
 - [ ] Evaluate Early Warning Latency: compare MLP trigger turn vs. judge-score escalation turn
 
-### Phase 4 — Intervention
+### Phase 4 — Data-Driven Attribution & Intervention (Section 14)
 
-- [ ] Implement NNSight hook for conditional residual stream injection
-- [ ] Use EMA "Running Belief" state (from Phase 3 smoothing pipeline) as real-time trigger for conditional clamping
-- [ ] Run full evaluation suite (ASR, BRR, MMLU, GSM8K) for all baselines
-- [ ] Create intervention visualization: plot D_t_smooth across turns for example trajectories
+- [x] **14.0–14.4:** Setup, config, trajectory statistics, model loading, feature extraction (with saved-data toggle)
+- [x] **14.5: Feature drift analysis** — Pearson correlation on 435 features: 309 F_H, 3 F_S, 123 neutral at θ=0.10. Layer-based heuristic was wrong (153/233 old-F_S are actually escalating)
+- [x] **14.6: Threshold sweep + MLP gradient attribution** — sweep θ ∈ [0.05, 0.30]; gradient×input attribution identified 180 causal drivers; feature #10 (layer 17, SAE 963) dominates at 3× next
+- [x] **14.7: Feature group ablation** — F_H-only AUC=0.706 beats baseline 0.694; F_S-only AUC=0.479 (below random); data-driven > layer-based split; 180 causal drivers retain 96.9% AUC
+- [x] **14.8: Full d_sae drift analysis** — **CRITICAL FINDING:** 19,728 F_S features exist in full 524K space (F_H:F_S = 1.7:1). Elastic Net filtered out nearly all F_S due to collinearity + L1 bias. Safety erosion IS real.
+- [ ] **14.9: Balanced feature re-selection** — select top-N F_H + top-N F_S from full d_sae by |corr|, bypassing Elastic Net bias
+- [ ] **14.10: Retrain MLP on balanced features** — new MLP with F_H + F_S representation; compare AUC vs old 435-feature MLP
+- [ ] **14.11: Compute intervention targets** — mean F_S activation during refusals, mean F_H activation during benign turns
+- [ ] **14.12: Implement intervention hook** — NNSight conditional clamping (F_S↑ + F_H↓), triggered by D_t > τ
+- [ ] **14.13: Run intervention evaluation** — re-run attacks with hook, judge-score per turn, measure ASR reduction
+- [ ] **14.14: Utility evaluation** — XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts
+- [ ] **14.15: Results & comparison** — compare all baselines, plot score trajectory suppression
 
 ### Phase 5 — Writing
 
