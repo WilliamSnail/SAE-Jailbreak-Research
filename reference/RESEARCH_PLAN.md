@@ -983,40 +983,78 @@ Late layers (22, 29) have **more F_S than F_H** — the original layer-based heu
 - Mean: +0.015, Std: 0.067, Max: +0.358, Min: -0.284
 - Slight positive skew (more escalating features), but F_S is a substantial minority
 
-### 7.1.5 Implications for Project Direction
+### 7.1.5 Balanced Feature Re-Selection Experiment (Cells 14.9–14.10) — COMPLETED — NEGATIVE RESULT
 
-**The current MLP detector is built on a biased feature set.** It was trained on 435 features that are 103:1 F_H-biased, so it learned to detect jailbreaks using only harmful content escalation. It never saw the 19,728 F_S features.
+**Hypothesis:** The Elastic Net's 103:1 F_H bias caused it to miss useful F_S features. Selecting top-200 F_H + top-200 F_S by drift correlation from the full d_sae would produce a more complete detector.
 
-**Two paths forward for intervention:**
+**Method:**
+- Selected top-200 features by positive correlation (F_H) + top-200 by negative correlation (F_S) = 400 features
+- Used `feature_matrix.npz` directly (no GPU re-extraction needed)
+- Trained new MLP (400 → 64 → 32 → 1) with same architecture and training procedure as Phase 3
+- 3 seeds, standard BCE, early stopping with patience=10
 
-**Path A — Quick (F_H-only suppression with current MLP):**
-- Use the 180 causal drivers from the current MLP
-- Intervene by suppressing escalating features toward benign baselines
-- Limitation: ignores safety erosion entirely; intervention is one-sided
+**Results:**
 
-**Path B — Thorough (balanced feature re-selection + MLP retrain):**
-- Select top-N F_H + top-N F_S features from the full d_sae by drift correlation magnitude (bypassing Elastic Net)
-- Retrain the MLP on this balanced feature set
-- Design combined intervention (F_H suppression + F_S restoration = Scenario C)
-- This is more principled and directly tests the "causal decoupling" thesis
+| Model | AUC | F1 |
+|---|---|---|
+| Old MLP (435 Elastic Net) | **0.982** | 0.851 |
+| Balanced MLP (200 F_H + 200 F_S) | 0.606 | 0.000 |
+| Balanced F_H only (zero F_S) | 0.628 | 0.000 |
+| Balanced F_S only (zero F_H) | 0.550 | 0.000 |
 
-**Recommendation:** Path B. The finding that safety erosion is real but was masked by feature selection is itself a significant result for the thesis — it shows the importance of feature selection methodology in mechanistic interpretability research.
+The balanced MLP is near-random. It predicts everything as negative (F1=0, accuracy=87.6% = negative class rate). Adding F_S features actually *hurts* compared to F_H-only (0.606 vs 0.628).
+
+**Why drift-selected features fail:**
+
+The critical distinction is between **within-class drift** and **cross-class discrimination**:
+
+- **Drift correlation** measures: "does this feature change as score increases *within jailbroken trajectories*?" This is a within-class temporal signal.
+- **Detection** requires: "can this feature distinguish jailbroken turns from refused turns?" This is a cross-class signal.
+
+A feature can have strong drift (corr = -0.28 with score in jailbroken conversations) but still be equally active in refused conversations → no discriminative value. The 19,728 F_S features erode during attacks, but similar erosion patterns may occur in refused conversations too (e.g., repeated benign questioning also shifts feature activations).
+
+The Elastic Net optimized for **discrimination** (predicting score across all trajectories, both jailbroken and refused). It correctly identified that drift-correlated F_S features aren't discriminative and dropped them — this was not a bias artifact but a correct feature selection decision.
+
+**Also notable:** The top-30 drift-F_H features (from full d_sae) had 0 overlap with the 435 Elastic Net features. The Elastic Net selected *different* F_H features — ones optimized for discrimination, not just within-class drift. This explains why even the balanced F_H-only AUC (0.628) is far below the Elastic Net F_H AUC (0.934).
+
+**Gradient attribution on balanced MLP:** F_H/F_S attribution ratio was 9.23×, confirming the MLP mostly ignores F_S features. Top-20 features are dominated by layer 17 F_H features.
+
+### 7.1.6 Revised Conclusions
+
+1. **Safety erosion features exist numerically** (19,728 in full d_sae) **but are not discriminative** for jailbreak detection. The erosion signal is not distinctive enough to separate jailbroken from refused conversations.
+
+2. **The Elastic Net's F_H-biased selection was correct**, not an artifact. It selected features that maximize cross-class discrimination, which happens to be dominated by F_H escalation.
+
+3. **Jailbreak detection is driven by F_H escalation.** The original 435-feature MLP (AUC=0.982) using primarily F_H features is the correct detector.
+
+4. **The intervention should proceed with Scenario B (F_H suppression)** using the 180 causal drivers from the original MLP. Scenario C (combined F_H + F_S) is unnecessary because F_S doesn't add detection value.
+
+5. **Open question:** The 200+200 balanced split may not be optimal. Alternative ratios (350+50, 400+0) or different selection methods (Elastic Net + forced F_S inclusion) could be explored. See 7.1.7.
+
+### 7.1.7 Alternative Ratio Exploration (TODO)
+
+The 200+200 split may be too aggressive in replacing discriminative F_H features with non-discriminative F_S. Alternative experiments:
+
+| Experiment | F_H | F_S | Rationale |
+|---|---|---|---|
+| Drift top-400 by |corr| | ~360 | ~40 | Natural ratio from drift correlation |
+| Elastic Net 435 + top-50 F_S | 435 | 50 | Augment, don't replace |
+| Top-200 F_H from d_sae only | 200 | 0 | Test if drift F_H alone works |
+| Elastic Net F_H + drift F_S | 309 | 50 | Keep proven F_H, add new F_S |
+
+These would determine whether the problem is (a) the 50/50 ratio, (b) the drift selection method itself, or (c) F_S features are genuinely uninformative.
 
 ### 7.2 Intervention Design (Informed by 7.1 Results)
 
-**Confirmed scenario: Scenario C — Both F_H escalation and F_S erosion contribute.**
+**Confirmed scenario: Scenario B — F_H escalation dominates detection.**
 
-The full d_sae analysis (7.1.4) shows F_H:F_S ratio of 1.7:1 in the raw feature space. Both mechanisms are active during jailbreaking. The intervention must address both:
+The balanced feature experiment (7.1.5) confirmed that F_S features don't add discriminative power. The intervention uses the original 435-feature MLP and its 180 causal drivers.
 
 **F_H suppression:** Suppress escalating features toward their benign baseline.
 - Subtract-only: `Δ_i = Baseline_Value - current` only when `current > Baseline_Value`
 - Baseline values = mean activation during benign early turns (score < 2)
 
-**F_S restoration:** Clamp eroding features back to their refusal-level target values.
-- Add-only: `Δ_i = Target_Value - current` only when `current < Target_Value`
-- Target values = mean activation during robust refusals (score < 2)
-
-**Ablation:** F_S-only restoration vs F_H-only suppression vs combined, to measure each mechanism's contribution to ASR reduction.
+**Optional F_S restoration (ablation only):** Test F_S restoration as a baseline comparison, but don't expect it to contribute.
 
 #### 7.2.1 Trigger Condition
 
@@ -1029,8 +1067,6 @@ D_t > τ
 where `D_t` is the raw MLP output (no output EMA — ablation 13.10.3 showed α_out=1.0 is best). For benign prompts, `D_t` stays near 0 → zero intervention → zero capability cost.
 
 **Threshold:** τ=0.4 (best F1=0.949) or τ=0.6 (zero FPR) from Phase 3 sweep.
-
-**Note:** If Path B (MLP retrain) is taken, the MLP and thresholds will need recalibration on the new feature set.
 
 #### 7.2.2 Residual Stream Injection via SAE Decoder
 
@@ -1316,14 +1352,15 @@ with model.trace(prompt_t):
 - [x] **14.5: Feature drift analysis** — Pearson correlation on 435 features: 309 F_H, 3 F_S, 123 neutral at θ=0.10. Layer-based heuristic was wrong (153/233 old-F_S are actually escalating)
 - [x] **14.6: Threshold sweep + MLP gradient attribution** — sweep θ ∈ [0.05, 0.30]; gradient×input attribution identified 180 causal drivers; feature #10 (layer 17, SAE 963) dominates at 3× next
 - [x] **14.7: Feature group ablation** — F_H-only AUC=0.706 beats baseline 0.694; F_S-only AUC=0.479 (below random); data-driven > layer-based split; 180 causal drivers retain 96.9% AUC
-- [x] **14.8: Full d_sae drift analysis** — **CRITICAL FINDING:** 19,728 F_S features exist in full 524K space (F_H:F_S = 1.7:1). Elastic Net filtered out nearly all F_S due to collinearity + L1 bias. Safety erosion IS real.
-- [ ] **14.9: Balanced feature re-selection** — select top-N F_H + top-N F_S from full d_sae by |corr|, bypassing Elastic Net bias
-- [ ] **14.10: Retrain MLP on balanced features** — new MLP with F_H + F_S representation; compare AUC vs old 435-feature MLP
-- [ ] **14.11: Compute intervention targets** — mean F_S activation during refusals, mean F_H activation during benign turns
-- [ ] **14.12: Implement intervention hook** — NNSight conditional clamping (F_S↑ + F_H↓), triggered by D_t > τ
-- [ ] **14.13: Run intervention evaluation** — re-run attacks with hook, judge-score per turn, measure ASR reduction
-- [ ] **14.14: Utility evaluation** — XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts
-- [ ] **14.15: Results & comparison** — compare all baselines, plot score trajectory suppression
+- [x] **14.8: Full d_sae drift analysis** — 19,728 F_S features exist in full 524K space (F_H:F_S = 1.7:1). Elastic Net filtered out nearly all F_S.
+- [x] **14.9: Balanced feature re-selection** — selected top-200 F_H + top-200 F_S from full d_sae by |corr|
+- [x] **14.10: Retrain MLP on balanced features** — **NEGATIVE RESULT:** balanced MLP AUC=0.606 (near random) vs old MLP AUC=0.982. Drift-correlated F_S features are not discriminative. Elastic Net selection was correct, not biased. Proceed with original MLP + F_H suppression (Scenario B).
+- [ ] **14.11: Alternative ratio sweep (optional)** — test different F_H:F_S ratios, Elastic Net + F_S augmentation, to confirm 200+200 wasn't just a bad split
+- [ ] **14.12: Compute intervention targets** — mean F_H activation during benign turns (for suppression baselines)
+- [ ] **14.13: Implement intervention hook** — NNSight hook with F_H suppression, triggered by D_t > τ
+- [ ] **14.14: Run intervention evaluation** — re-run attacks with hook, judge-score per turn, measure ASR reduction
+- [ ] **14.15: Utility evaluation** — XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts
+- [ ] **14.16: Results & comparison** — compare all baselines, plot score trajectory suppression
 
 ### Phase 5 — Writing
 
