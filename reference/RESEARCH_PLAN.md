@@ -1031,18 +1031,52 @@ The Elastic Net optimized for **discrimination** (predicting score across all tr
 
 5. **Open question:** The 200+200 balanced split may not be optimal. Alternative ratios (350+50, 400+0) or different selection methods (Elastic Net + forced F_S inclusion) could be explored. See 7.1.7.
 
-### 7.1.7 Alternative Ratio Exploration (TODO)
+### 7.1.7 Why Drift Correlation Fails as Feature Selection — Theoretical Analysis
 
-The 200+200 split may be too aggressive in replacing discriminative F_H features with non-discriminative F_S. Alternative experiments:
+**Root cause:** Drift correlation and Elastic Net measure fundamentally different things.
 
-| Experiment | F_H | F_S | Rationale |
-|---|---|---|---|
-| Drift top-400 by |corr| | ~360 | ~40 | Natural ratio from drift correlation |
-| Elastic Net 435 + top-50 F_S | 435 | 50 | Augment, don't replace |
-| Top-200 F_H from d_sae only | 200 | 0 | Test if drift F_H alone works |
-| Elastic Net F_H + drift F_S | 309 | 50 | Keep proven F_H, add new F_S |
+**Drift correlation (used in 14.5/14.8):** For each feature, computes Pearson correlation between activation and judge score **within jailbroken trajectories only**. It never sees refused trajectories. This answers: *"Which features change over time during successful jailbreaks?"*
 
-These would determine whether the problem is (a) the 50/50 ratio, (b) the drift selection method itself, or (c) F_S features are genuinely uninformative.
+**Elastic Net (Phase 2):** Supervised regression trained on **both jailbroken and refused trajectories** simultaneously. L1 sparsity forces most weights to zero; L2 handles correlated features. It finds features that are **jointly discriminative** — features whose combined activations best predict whether a turn has a high or low score across both classes.
+
+| Property | Drift Correlation | Elastic Net |
+|---|---|---|
+| Sees refused data? | **No** (jailbroken only) | **Yes** (both classes) |
+| Selection criterion | Temporal trend within jailbroken | Cross-class prediction |
+| Considers feature interactions? | No (univariate) | Yes (multivariate) |
+| What it finds | Features that change over time | Features that distinguish high vs low scores |
+
+**Concrete failure mode:** A feature that goes 3→8 in jailbroken trajectories AND 3→7 in refused trajectories has high drift correlation (strong escalation in jailbroken) but is useless for discrimination (both classes show similar behavior). Drift correlation selects it; Elastic Net rejects it.
+
+The **0% overlap** between drift-selected and Elastic Net features, combined with the **AUC=0.606** result, confirms: within-class temporal trend ≠ cross-class discriminative power.
+
+### 7.1.8 Proposed Fix: Differential Drift
+
+Instead of computing drift on jailbroken trajectories alone, compute it on **both classes** and look for features where the drift behavior **differs**:
+
+```
+For each feature i:
+  corr_jailbroken[i] = pearson(activation_i, score) on jailbroken trajectories
+  corr_refused[i]    = pearson(activation_i, score) on refused trajectories
+  differential[i]    = corr_jailbroken[i] - corr_refused[i]
+```
+
+Features with high |differential| are ones that behave differently across classes — escalating during jailbreaks but staying flat (or moving oppositely) during refusals.
+
+| Feature behavior | Drift (current) | Differential drift |
+|---|---|---|
+| Escalates in jailbroken, flat in refused | High | **High** (good — discriminative) |
+| Escalates in both classes | High | **Low** (filtered out — non-discriminative) |
+| Flat in both | Low | Low |
+| Flat in jailbroken, drops in refused | Low | **Moderate** (interesting signal) |
+
+Row 2 is the failure mode that caused AUC=0.606 — drift correlation selected features that escalate in jailbroken but also escalate in refused. Differential drift would filter those out.
+
+**Implementation plan (cell 14.11):**
+1. Modify cell 14.5 drift analysis to compute correlation on both jailbroken AND refused trajectories (toggle: `DIFFERENTIAL_DRIFT = True`)
+2. Select top-N features by |differential| regardless of F_H/F_S label
+3. Retrain MLP on differential-selected features
+4. Compare AUC vs Elastic Net (0.982) and balanced drift (0.606)
 
 ### 7.2 Intervention Design (Informed by 7.1 Results)
 
@@ -1113,13 +1147,14 @@ with model.trace(prompt_t):
 | 14.6 | **Threshold sweep + MLP gradient attribution** | Sweep θ ∈ [0.05, 0.30]; ∂D_t/∂input for high-D_t turns; cross-reference drift × importance | Done |
 | 14.7 | **Feature group ablation** | 8 zero-out experiments; data-driven vs layer-based comparison | Done |
 | 14.8 | **Full d_sae drift analysis** | Pearson correlation on all 524,288 features from `feature_matrix.npz`; proves F_S exists but was filtered by Elastic Net | Done |
-| 14.9 | **Balanced feature re-selection** | Select top-N F_H + top-N F_S from full d_sae by |corr|; create new balanced feature set | TODO |
-| 14.10 | **Retrain MLP on balanced features** | New MLP with F_H + F_S features; compare AUC vs old MLP | TODO |
-| 14.11 | **Compute intervention targets** | Mean F_S activation during refusals, mean F_H activation during benign turns | TODO |
-| 14.12 | **Implement intervention hook** | NNSight hook with data-driven F_H/F_S clamping, triggered by D_t > τ | TODO |
-| 14.13 | **Run intervention evaluation** | Re-run attacks with hook active, judge-score per turn, measure ASR reduction | TODO |
-| 14.14 | **Utility evaluation** | XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts | TODO |
-| 14.15 | **Results & comparison** | Compare all baselines, plot score trajectory suppression | TODO |
+| 14.9 | **Balanced feature re-selection** | Select top-200 F_H + top-200 F_S from full d_sae by |corr|; create new balanced feature set | Done (AUC=0.606, negative result) |
+| 14.10 | **Retrain MLP on balanced features** | New MLP with F_H + F_S features; compare AUC vs old MLP | Done (AUC=0.606, negative result) |
+| 14.11 | **Differential drift analysis** | Compute drift on both classes; select top-N by |differential|; retrain MLP | TODO |
+| 14.12 | **Compute intervention targets** | Mean F_S activation during refusals, mean F_H activation during benign turns | TODO |
+| 14.13 | **Implement intervention hook** | NNSight hook with data-driven F_H/F_S clamping, triggered by D_t > τ | TODO |
+| 14.14 | **Run intervention evaluation** | Re-run attacks with hook active, judge-score per turn, measure ASR reduction | TODO |
+| 14.15 | **Utility evaluation** | XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts | TODO |
+| 14.16 | **Results & comparison** | Compare all baselines, plot score trajectory suppression | TODO |
 
 **Output directory:** `results/intervention/`
 
