@@ -1,55 +1,61 @@
 # DO_NEXT — Phase 4 Status & Next Steps
 
-**Last updated:** 2026-03-12
-**Notebook:** `cross_layer_causal_sae_jailbreak_detection_V-1.3.ipynb` (100 cells)
+**Last updated:** 2026-03-13
+**Notebook:** `cross_layer_causal_sae_jailbreak_detection_V-1.3.ipynb` (101 cells)
 
 ---
 
-## Current Status: Phase 4 — Data-Driven Feature Attribution
+## RESOLVED: Section 14 Bugs (5 issues found, 4 fixed)
 
-### What we've done (cells 14.0–14.11)
+**Correct baseline AUC: 0.9416** (from Phase 3 checkpoint, val-only)
 
-Cells 14.0–14.8 are complete and validated. Cells 14.9–14.11 explored alternative feature selection methods. All experiments concluded — ready to move to intervention.
+### Bug Summary
 
-### Key Finding: The 0.982 vs 0.675 Discrepancy
+| # | Bug | Cells | Impact | Fixed? |
+|---|-----|-------|--------|--------|
+| 1 | Index mapping (block vs interleaved) | 96,97,99,100 | Wrong features used, EN AUC=0.675 instead of ~0.94 | Yes |
+| 2 | Eval leakage (train+val combined) | 95,98 | AUC inflated 0.9416→0.982 | Yes |
+| 3 | Train/val split (goal overlap) | 97 | Only 8 val trajectories instead of ~61 | Yes |
+| 4 | valid_mask not applied | 97 | jb_specific `\|corr_ref\| < THETA_FLAT` filter bypassed | Yes |
+| 5 | Acc/F1 threshold mismatch | 95 | Acc/F1 unreliable (AUC unaffected) | No — AUC is primary metric |
 
-**Problem:** Elastic Net 435 features give AUC=0.982 in cell 14.7 but only AUC=0.675 in cell 14.11. These numbers should be comparable but aren't. All cell 14.9/14.10/14.11 experiments used `feature_matrix.npz` and got the deflated baseline, making absolute AUC values unreliable.
+### Bug 1: Index Mapping (cells 96, 97, 99, 100)
 
-**Two pipelines exist:**
-
+Code assumed `feature_matrix.npz` uses interleaved layout, but it uses block layout:
 ```
-Cell 14.7 (AUC = 0.982):
-  Pre-trained Phase 3 MLP (loaded from best_model.pt)
-      ↓ evaluated on
-  trajectory_dataset.pt features (435-dim, built by Phase 3 cell 13.5)
-      ↓
-  AUC = 0.982
-
-Cell 14.11 (AUC = 0.675):
-  NEW MLP (randomly initialized, trained from scratch)
-      ↓ trained on
-  feature_matrix.npz rows (selecting 435 EN columns from 524K)
-      ↓
-  AUC = 0.675
+ACTUAL (block):      [L9_raw, L17_raw, L22_raw, L29_raw, L9_delta, L17_delta, L22_delta, L29_delta]
+ASSUMED (interleaved): [L9_raw, L9_delta, L17_raw, L17_delta, ...]
 ```
+Wrong formula: `gi = layer_idx * 2 * d_sae + ...`
+Correct formula: `gi = (n_layers * d_sae if is_delta else 0) + layer_idx * d_sae + sae_idx`
+Or: use `original_idx` from `feature_sets.json`.
 
-**Two confounded differences:**
+Verified: `original_idx` gives Pearson r=1.0000 between `feature_matrix.npz` and `trajectory_dataset.pt`.
 
-1. **Features may not be identical** — Both use the same 435 SAE feature indices, but:
-   - `trajectory_dataset.pt` was built by Phase 3's on-the-fly extraction (cell 13.5): model forward pass → SAE encode → SWiM → select 435 features → compute Δ-features → save
-   - `feature_matrix.npz` was built by Phase 2 (cell 12.x): separate extraction run, possibly different token handling, normalization, or Δ-feature computation order
-   - Even small numerical differences (floating point, different batch processing) could compound
+### Bug 2: Eval Leakage (cells 95, 98)
 
-2. **Pre-trained vs fresh MLP** — Cell 14.7 loads the already-trained Phase 3 MLP and just evaluates (no retraining). Cell 14.11 trains a fresh MLP from scratch in a simplified flat loop — all turns shuffled as independent samples, no per-trajectory batching.
+- Cell 95 (14.7): `for d in dataset` evaluated on train+val combined → AUC=0.982 (inflated). Fixed to `for d in val_dataset`.
+- Cell 98 (14.10): `for d in bal_train + bal_val` in EVALUATION section. Fixed to `for d in bal_val`.
 
-**How to isolate the cause:**
+### Bug 3: Train/Val Split (cell 97)
 
-| Test | What it does | If AUC ≈ 0.675 | If AUC ≈ 0.982 |
-|------|-------------|-----------------|-----------------|
-| **Test A** | Train fresh MLP on `trajectory_dataset.pt` (same 14.11 training procedure, Phase 3 features) | Problem is training procedure | Problem is feature values |
-| **Test B** | Evaluate pre-trained Phase 3 MLP on `feature_matrix.npz` 435 columns | Problem is feature values | Problem is training procedure |
+Split by `if goal in train_goals` (checked first), but 42 of 46 val goals also exist in train_goals (same goal appears in multiple trajectories). Result: only 8 val trajectories.
+Fixed: trajectory-signature matching `(goal, tuple(int(scores)))` → ~61 val trajectories. Same method used in cells 99/100.
 
-**Practical implication:** All drift/differential experiments (14.9–14.11) compared against the deflated 0.675 baseline. Relative rankings still hold (diff-only ≈ random, combined ≈ no improvement), but we don't know if differential features would help in the Phase 3 pipeline.
+### Bug 4: valid_mask Not Applied (cell 97)
+
+Cell 14.9 selected features from raw `corr_full` without applying `valid_mask_saved`. In `jb_specific` mode, `valid_mask` enforces `|corr_ref| < THETA_FLAT` — without it, features that drift in both JB and refused could be selected, defeating the purpose.
+Fixed: apply `corr_full_saved` + `valid_mask_saved`, zero out invalid features before selection.
+
+### Bug 5: Acc/F1 Threshold Mismatch (cell 95) — NOT FIXED
+
+MLP trained with soft labels (`score/10`), but acc/F1 use `preds > 0.5` threshold. A turn with score=6 produces pred~0.6 > 0.5 → false positive, since ground truth is `score > 8`. Correct threshold would be ~0.8.
+**AUC is unaffected** (rank-based, threshold-independent). Since AUC is the primary comparison metric for ablation experiments, this is low priority.
+
+### What was NOT affected
+
+- **Drift correlation values (14.5, 14.8)** — operate on full 524K matrix directly, no manual index mapping
+- **Phase 3 pipeline (cells 13.x)** — uses its own extraction, never touches `feature_matrix.npz` indices
 
 ---
 
@@ -66,7 +72,7 @@ Cell 14.11 (AUC = 0.675):
 
 ### Why drift correlation fails as feature selection
 
-Drift correlation (even differential) is **univariate** — it ranks each feature independently. Elastic Net is **multivariate** — it finds feature *combinations* that jointly predict the label. A feature with high |differential| might be redundant with other features, or only useful in combination with features that have low |differential|.
+Drift correlation (even differential) is **univariate** — it ranks each feature independently. Elastic Net is **multivariate** — it finds feature *combinations* that jointly predict the label.
 
 | Property | Drift Correlation | Elastic Net |
 |----------|------------------|-------------|
@@ -77,51 +83,43 @@ Drift correlation (even differential) is **univariate** — it ranks each featur
 
 ### MLP Retraining Results (cell 14.11, fixed val split)
 
-All trained on `feature_matrix.npz` with proper val split (1734 train / 401 val turns):
+**INVALIDATED** — all results below used wrong column indices (the index bug above). Need to re-run with corrected code.
 
-| Experiment | N feat | AUC mean | AUC std |
-|---|---|---|---|
-| **Elastic Net 435 (baseline)** | **435** | **0.675** | **0.021** |
-| EN 435 + top-100 diff | 535 | 0.685 | 0.033 |
-| EN 435 + top-50 diff | 485 | 0.660 | 0.049 |
-| EN 435 + top-200 diff | 635 | 0.613 | 0.041 |
-| Diff-only 435 | 435 | 0.585 | 0.053 |
-| Diff-only 200 | 200 | 0.542 | 0.038 |
-| Balanced drift 200+200 | 400 | 0.606 | — |
-
-**Conclusions:**
-- Differential drift features provide at best marginal improvement over EN (+0.01 with top-100)
-- Adding too many diff features hurts (noise overwhelms signal)
-- Diff-only is near random — cannot replace Elastic Net
-- The EN 435 features remain the best feature set for the MLP detector
+| Experiment | N feat | AUC mean | AUC std | Status |
+|---|---|---|---|---|
+| **Elastic Net 435 (baseline)** | **435** | **0.675** | **0.021** | INVALID — wrong columns |
+| EN 435 + top-100 diff | 535 | 0.685 | 0.033 | INVALID |
+| EN 435 + top-50 diff | 485 | 0.660 | 0.049 | INVALID |
+| EN 435 + top-200 diff | 635 | 0.613 | 0.041 | INVALID |
+| Diff-only 435 | 435 | 0.585 | 0.053 | INVALID |
+| Diff-only 200 | 200 | 0.542 | 0.038 | INVALID |
+| Balanced drift 200+200 | 400 | 0.606 | — | INVALID |
 
 ---
 
 ## What To Do Next
 
-### Priority 1: Resolve the 0.982 vs 0.675 gap (optional but recommended)
+### Priority 1: Proceed to Intervention (cells 14.13–14.17)
 
-Run Test A and/or Test B (described above) to understand why feature_matrix.npz gives lower AUC. This determines whether future experiments need the Phase 3 pipeline or can use feature_matrix.npz.
-
-**Implementation:** Add cell 14.12 that loads `trajectory_dataset.pt`, flattens it into per-turn (X, y) arrays, and trains a fresh MLP with the same 14.11 procedure. If AUC ≈ 0.982, the features are different; if AUC ≈ 0.675, the training procedure is the bottleneck.
-
-### Priority 2: Proceed to Intervention (cells 14.12–14.16)
-
-Accept Elastic Net 435 as the final feature set and proceed with F_H suppression:
+Accept Elastic Net 435 with the Phase 3 pipeline (val AUC=0.9416) as the final feature set and proceed with F_H suppression. Renumber from 14.13 since 14.12 is now the diagnostic cell.
 
 | Cell | Task | Description |
 |------|------|-------------|
-| 14.12 | Compute intervention targets | Mean F_H activation during benign turns (score < 2) as suppression baseline |
-| 14.13 | Implement intervention hook | NNSight hook: when D_t > τ, suppress F_H features toward benign baseline via SAE decoder |
-| 14.14 | Run intervention evaluation | Re-run Crescendo attacks with hook active, measure ASR reduction |
-| 14.15 | Utility evaluation | XSTest (BRR), MMLU, GSM8K on intervened model |
-| 14.16 | Results & comparison | Compare all baselines, plot score trajectory suppression |
+| 14.13 | Compute intervention targets | Mean F_H activation during benign turns (score < 2) as suppression baseline |
+| 14.14 | Implement intervention hook | NNSight hook: when D_t > τ, suppress F_H features toward benign baseline via SAE decoder |
+| 14.15 | Run intervention evaluation | Re-run Crescendo attacks with hook active, measure ASR reduction |
+| 14.16 | Utility evaluation | XSTest (BRR), MMLU, GSM8K on intervened model |
+| 14.17 | Results & comparison | Compare all baselines, plot score trajectory suppression |
 
 **Key design decisions (from RESEARCH_PLAN.md Section 7.2):**
 - **Trigger:** D_t > τ (τ=0.4 for best F1, or τ=0.6 for zero FPR)
 - **Mechanism:** Subtract-only on F_H features: `correction = target - current` only when `current > target`
 - **Target values:** Mean activation during benign early turns (score < 2)
 - **Injection:** Decode correction through SAE decoder into residual stream
+
+### Priority 2: Re-run cells 14.9–14.12 with corrected indices
+
+Now that the index bug is fixed, re-run all experiments to get correct results. EN baseline should now match Phase 3's ~0.94+ AUC.
 
 ### Priority 3: Phase 3 pending ablations (lower priority)
 
@@ -133,12 +131,12 @@ Accept Elastic Net 435 as the final feature set and proceed with F_H suppression
 
 ## File Reference
 
-| File | Description |
-|------|-------------|
-| `results/feature_discovery/feature_matrix.npz` | 2135 × 524,288 full SAE feature matrix (Phase 2) |
-| `results/feature_discovery/feature_matrix_meta.json` | Metadata with `turn_meta` per-row mapping |
-| `results/feature_discovery/feature_sets.json` | 435 Elastic Net features (F_H + F_S definitions) |
-| `results/mlp_detector/best_model.pt` | Phase 3 MLP checkpoint |
-| `results/mlp_detector/trajectory_dataset.pt` | Phase 3 train/val dataset (435 features, per-trajectory) |
-| `results/intervention/` | Phase 4 outputs (drift, attribution, ablation, differential results) |
-| `reference/RESEARCH_PLAN.md` | Full research plan with all findings |
+| File | Description | Trust level |
+|------|-------------|-------------|
+| `results/mlp_detector/trajectory_dataset.pt` | Phase 3 train/val dataset (435 features, per-trajectory) | **PRIMARY — use this** |
+| `results/mlp_detector/best_model.pt` | Phase 3 MLP checkpoint (val AUC=0.9416) | **PRIMARY** |
+| `results/feature_discovery/feature_matrix.npz` | 2135 × 524,288 full SAE features (Phase 2) | **Valid — use `original_idx` for EN column mapping** |
+| `results/feature_discovery/feature_matrix_meta.json` | Metadata with `turn_meta` per-row mapping | Valid for metadata, not for feature values |
+| `results/feature_discovery/feature_sets.json` | 435 Elastic Net features (F_H + F_S definitions) | Valid |
+| `results/intervention/` | Phase 4 outputs (drift, attribution, ablation, differential, diagnostic) | Valid |
+| `reference/RESEARCH_PLAN.md` | Full research plan with all findings | Valid |

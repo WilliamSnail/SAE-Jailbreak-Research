@@ -421,6 +421,12 @@ x_t = [z_t ⊕ Δz_t]    # shape: (524288,)
 | Δ L22 | 393216 : 458752 | Turn-to-turn change, layer 22 |
 | Δ L29 | 458752 : 524288 | Turn-to-turn change, layer 29 |
 
+> **ALERT — Index mapping pitfall:** This is a **block layout** (all raw layers, then all delta layers), NOT interleaved `[L0_raw, L0_delta, L1_raw, L1_delta, ...]`. The correct global index formula is:
+> ```python
+> gi = (n_layers * d_sae if is_delta else 0) + layer_idx * d_sae + sae_idx
+> ```
+> Or use `original_idx` from `feature_sets.json`. Cells 14.8–14.12 were affected by a bug that assumed interleaved layout (`layer_idx * 2 * d_sae + ...`), producing wrong column indices and deflated AUC (0.675 vs correct ~0.94).
+
 #### Step 4: Labels
 
 - **Soft labels (training):** `y_t = judge_score_t / 10` — continuous 0.0–1.0, gives gradient signal at every turn
@@ -1050,33 +1056,227 @@ The Elastic Net optimized for **discrimination** (predicting score across all tr
 
 The **0% overlap** between drift-selected and Elastic Net features, combined with the **AUC=0.606** result, confirms: within-class temporal trend ≠ cross-class discriminative power.
 
-### 7.1.8 Proposed Fix: Differential Drift
+### 7.1.8 Drift Feature Selection: Three Modes (Cell 14.8)
 
-Instead of computing drift on jailbroken trajectories alone, compute it on **both classes** and look for features where the drift behavior **differs**:
+Cell 14.8 computes Pearson correlation on both classes and supports three feature selection modes via `DRIFT_MODE`:
 
 ```
 For each feature i:
-  corr_jailbroken[i] = pearson(activation_i, score) on jailbroken trajectories
-  corr_refused[i]    = pearson(activation_i, score) on refused trajectories
-  differential[i]    = corr_jailbroken[i] - corr_refused[i]
+  corr_jb[i]  = pearson(activation_i, score) on jailbroken trajectories
+  corr_ref[i] = pearson(activation_i, score) on refused trajectories
 ```
 
-Features with high |differential| are ones that behave differently across classes — escalating during jailbreaks but staying flat (or moving oppositely) during refusals.
+**Mode 1: `jb_only`** — Original. Rank by |corr_jb|. Does not see refused data.
 
-| Feature behavior | Drift (current) | Differential drift |
-|---|---|---|
-| Escalates in jailbroken, flat in refused | High | **High** (good — discriminative) |
-| Escalates in both classes | High | **Low** (filtered out — non-discriminative) |
-| Flat in both | Low | Low |
-| Flat in jailbroken, drops in refused | Low | **Moderate** (interesting signal) |
+**Mode 2: `differential`** — Rank by |corr_jb - corr_ref|. Selects features that behave differently across classes, but conflates two signals:
+- Features that drift in JB only (good — jailbreak-specific)
+- Features that drift in **opposite directions** in both classes (gets doubled |differential| but may just reflect class-level differences, not jailbreak progression)
 
-Row 2 is the failure mode that caused AUC=0.606 — drift correlation selected features that escalate in jailbroken but also escalate in refused. Differential drift would filter those out.
+Full d_sae differential results showed F_S outnumbering F_H (42,772 vs 33,629 at θ=0.10), with top-30 features ALL being F_S with pattern CorrJB≈-0.2, CorrRef≈+0.2. The subtraction doubles their score.
 
-**Implementation plan (cell 14.11):**
-1. Modify cell 14.5 drift analysis to compute correlation on both jailbroken AND refused trajectories (toggle: `DIFFERENTIAL_DRIFT = True`)
-2. Select top-N features by |differential| regardless of F_H/F_S label
-3. Retrain MLP on differential-selected features
-4. Compare AUC vs Elastic Net (0.982) and balanced drift (0.606)
+**Mode 3: `jb_specific`** — Rank by |corr_jb|, but only among features where |corr_ref| < THETA_FLAT. This isolates features that **only drift during jailbreaks** while staying flat in refusals — the cleanest jailbreak-specific signal.
+
+| CorrJB | CorrRef | Differential | JB-specific |
+|--------|---------|-------------|-------------|
+| +0.3 | ~0 | +0.3 | **Selected** (escalates in JB, flat in refused) |
+| +0.3 | +0.3 | ~0 | Filtered (escalates in both) |
+| -0.2 | +0.2 | -0.4 | Filtered (not flat in refused) |
+| -0.2 | ~0 | -0.2 | **Selected** (erodes in JB, flat in refused) |
+
+Differential mode selects rows 1, 3, 4. JB-specific selects only rows 1 and 4 — features where the refused class shows no temporal trend, making them unambiguously jailbreak-driven.
+
+**Implementation:** Cell 14.8 exports `corr_full_saved` and `valid_mask_saved`. In jb_specific mode, `valid_mask` includes the `|corr_ref| < THETA_FLAT` filter, so downstream cells (14.9, 14.11) automatically only see jb-specific features.
+
+**Cell 14.11 experiments (needs re-run with corrected indices):**
+1. JB-specific features only (top-N by |corr_jb|, ref-flat)
+2. EN 435 baseline (using correct `original_idx`)
+3. EN 435 + top-K jb-specific features (combined)
+
+### 7.1.9 Pre-Filtering Gap: Phase 2 vs Phase 4 Drift Analysis
+
+**Discovery:** Phase 2 applied two-stage filtering before Elastic Net, but Phase 4 drift analysis ran on raw 524,288 features with **no filtering**. This inconsistency likely inflated the number of "drift features" with noise from rarely-firing SAE latents.
+
+**Phase 2 pipeline (before EN):**
+```
+524,288 features
+  → Stage 1: Firing rate filter (>5% activation rate)  → ~X features
+  → Stage 2: SelectKBest (ANOVA F-test, top 10k)       → 10,000 features
+  → Z-score normalization
+  → Elastic Net                                         → 435 features
+```
+
+**Phase 4 drift analysis (cell 14.6):**
+```
+524,288 features → Pearson correlation directly (no filtering)
+```
+
+**Impact:** Many drift-selected features may fire in <5% of turns (e.g., active in 2/2135 turns). These produce unreliable Pearson correlations — a single outlier can create a high |r| with minimal data. The comprehensive selection comparison (cell 14.9) showed all pure-drift strategies achieving AUC 0.62-0.71, which may partly reflect garbage feature inclusion.
+
+**Fix (cell 14.6 — superseded by 7.1.10.4):**
+- Original toggle `APPLY_PHASE2_FILTERS` has been replaced by a unified 5-mode filter system (`DRIFT_FILTER_MODE`)
+- Phase 2 ANOVA is now one of 5 filter options, alongside 3 temporal filters and a "none" baseline
+- See section 7.1.10.4 for the current implementation
+
+**Expected outcome:** Filtering should:
+1. Reduce F_H/F_S counts (remove noise features)
+2. Potentially improve drift-selected MLP AUC (fewer garbage features)
+3. Show whether the EN vs drift gap is partly a filtering artifact
+
+**Actual outcome (cell 14.9 re-run with `APPLY_PHASE2_FILTERS = True`):**
+- Filtering narrowed candidate pool from 524K → 10K but did NOT meaningfully improve drift feature quality
+- Best: EN+100 drift = 0.9593 (+0.0177 vs EN baseline), comparable to unfiltered EN+50 = 0.9638
+- Pure drift strategies still 0.64-0.76 AUC — the gap is NOT a filtering artifact
+- Conclusion: ANOVA is the wrong pre-filter for drift analysis (see 7.1.10)
+
+### 7.1.10 Statistical Methods & Temporal Pre-Filter Design
+
+#### 7.1.10.1 Why ANOVA Is Wrong for Drift Pre-Filtering
+
+**ANOVA F-test** measures whether the **mean activation** of a feature differs significantly between two classes (jailbreak vs. refused) at any single timepoint. It computes:
+
+```
+F = variance_between_groups / variance_within_groups
+```
+
+High F means the feature is a good **static classifier** — its activation level separates classes. This is exactly what Phase 2 needed before Elastic Net: find features whose activation values distinguish JB from refused turns.
+
+**Drift analysis** asks a fundamentally different question: does a feature's activation **change over turns** within a trajectory? A feature can be:
+- High-F, no-drift: always high in JB, always low in refused, but constant over turns → useful for EN, useless for drift
+- Low-F, high-drift: similar mean across classes, but steadily increases during JB trajectories → missed by ANOVA, potentially valuable for drift
+
+These are **orthogonal properties**. Applying ANOVA before drift analysis filters out potentially interesting drift features while keeping static ones that don't drift. The cell 14.9 results confirmed this: ANOVA filtering didn't improve drift feature quality.
+
+#### 7.1.10.2 Z-Score Normalization
+
+Z-scoring transforms each feature to mean=0, std=1: `z = (x - μ) / σ`. This prevents high-magnitude features from dominating distance/gradient calculations.
+
+**Relevance to drift:** Pearson correlation (used in cell 14.6) is already scale-invariant — it internally normalizes. So z-scoring doesn't affect drift correlations. However, when drift-selected features are fed into the MLP, z-scoring the MLP inputs improves training stability. Phase 3 already applies z-scoring before MLP training.
+
+#### 7.1.10.3 Temporal Pre-Filters for Drift Analysis
+
+Three alternative pre-filters designed specifically for temporal/drift analysis:
+
+**Filter A: Temporal Variance Filter**
+
+Measures how much a feature's activation varies across turns within trajectories.
+
+```python
+# For each feature j, compute variance of activations across turns within each trajectory
+# Then average across all trajectories
+for each trajectory t:
+    var_j_t = Var(activation_j across turns in t)
+temporal_var_j = mean(var_j_t across all trajectories)
+# Keep features where temporal_var_j > threshold
+```
+
+**Rationale:** Features that never change across turns (temporal_var ≈ 0) cannot possibly show drift, regardless of class. This filter removes truly flat features — a necessary condition for drift, without imposing any class-based bias like ANOVA does.
+
+**Implementation complexity:** Low. Requires iterating over trajectories and computing per-feature variance. Can reuse `traj_groups` from cell 14.1. The threshold can be set as a percentile (e.g., keep top 50% by temporal variance).
+
+**Filter B: Monotonicity Filter (Spearman Rank Correlation)**
+
+Measures whether a feature shows consistent directional change over turns.
+
+```python
+# For each feature j in each trajectory t:
+#   Compute Spearman rank correlation between turn_index and activation_j
+# Average |rho| across trajectories
+for each trajectory t:
+    rho_j_t = SpearmanCorr(turn_indices, activation_j[turns_in_t])
+monotonicity_j = mean(|rho_j_t| across all trajectories)
+# Keep features where monotonicity_j > threshold
+```
+
+**Rationale:** Pearson correlation (used in cell 14.6) measures linear trends. Spearman measures monotonic trends — it catches features that consistently increase/decrease even if the relationship isn't perfectly linear (e.g., step-function activation at turn 3). A feature with high monotonicity in at least some trajectories is more likely to show real drift.
+
+**Difference from the existing drift correlation in cell 14.6:** Cell 14.6 computes correlation across ALL turns pooled together. This filter computes per-trajectory correlations, then aggregates. A feature could have high pooled correlation (because JB trajectories drift up and refused are flat) but low per-trajectory monotonicity (because the drift is noisy within individual trajectories). Conversely, a feature with high per-trajectory monotonicity in JB but not refused is exactly what we want.
+
+**Implementation complexity:** Medium. Requires per-trajectory Spearman computation for each feature. With 2135 turns across ~300 trajectories and 524K features, this is ~300 × 524K Spearman computations. Can be vectorized by computing rank correlations on the feature matrix grouped by trajectory. Feasible but slower than Filter A.
+
+**Filter C: Class-Conditional Temporal Filter**
+
+Measures whether a feature's temporal trend differs between JB and refused trajectories.
+
+```python
+# For each feature j:
+#   mono_jb_j  = mean |Spearman(turn, activation)| across JB trajectories
+#   mono_ref_j = mean |Spearman(turn, activation)| across refused trajectories
+# Keep features where |mono_jb_j - mono_ref_j| > threshold
+# OR: mono_jb_j > threshold AND mono_ref_j < flat_threshold
+```
+
+**Rationale:** This is the temporal equivalent of differential drift — it finds features whose temporal behavior differs between classes. Unlike ANOVA (which looks at static level differences), this looks at dynamic trend differences.
+
+**Relationship to existing drift correlation:** This is conceptually similar to the differential mode in cell 14.6 (`corr_jb - corr_ref`), but computed per-trajectory with Spearman rather than pooled with Pearson. The per-trajectory approach is more robust to trajectory-length variation and non-linear trends.
+
+**Implementation complexity:** Medium-high. Same computation as Filter B but split by class. Requires class labels for trajectories (available from `y_soft`). The class-conditional aspect adds the F_H/F_S distinction naturally — no need for post-hoc sign-based grouping.
+
+#### 7.1.10.4 Implementation (cell 14.6 redesign)
+
+All three temporal filters + Phase 2 ANOVA + "none" baseline are implemented in cell 14.6 as a unified filter system. The old `APPLY_PHASE2_FILTERS` toggle is replaced by:
+
+```python
+DRIFT_FILTER_MODE = "none"   # "none", "phase2_anova", "temporal_variance",
+                              # "monotonicity", "class_conditional"
+FILTER_K = 10000              # How many features each filter keeps
+MIN_FIRING_PCT = 5.0          # Firing rate pre-filter (common first stage)
+```
+
+**Pipeline:**
+```
+524K features
+  → Always: compute drift correlations on ALL 524K (Pearson, vectorized)
+  → Always: compute ALL filter scores in single trajectory loop
+  → Firing rate > MIN_FIRING_PCT%  (common first stage for filters A-C)
+    → base_filtered = base_valid & firing_mask
+      → A: Temporal Variance    top-K from base_filtered
+      → B: Monotonicity         top-K from base_filtered
+      → C: Class-Conditional    top-K from base_filtered
+      → Phase 2 ANOVA           firing rate + SelectKBest (own pipeline)
+  → "none" = base_valid (all features with non-zero std, no firing filter)
+```
+
+**Key design decisions:**
+- Drift correlations computed once on all 524K, filters only create masks — no re-computation needed
+- Single loop over trajectories computes temporal variance, monotonicity, AND class-conditional scores simultaneously
+- Monotonicity uses vectorized Spearman: `rank-rank Pearson = Spearman`, applied per-trajectory (needs ≥3 turns)
+- Class-conditional splits trajectories by class (JB if any turn has y_hard==1) and takes |mono_jb - mono_ref|
+- Firing rate pre-filter removes features firing in <5% of turns before temporal filter ranking (prevents spurious high-rho from 2-3 non-zero activations)
+- `DRIFT_FILTER_MODE` selects which mask is active for downstream cells 14.7-14.8
+- All 5 masks stored in `all_filter_masks` dict for cell 14.9 comparison
+- Filter overlap (Jaccard similarity) printed to show how much filters agree
+
+**Exports:**
+- `corr_diff_saved`, `valid_mask_diff_saved` — differential drift correlations with active filter mask
+- `corr_full_saved`, `valid_mask_saved` — jb_specific drift with active filter mask
+- `all_filter_masks` — dict of all 5 masks for cell 14.9
+- `all_filter_scores` — dict of raw filter scores for analysis
+
+#### 7.1.10.5 Comprehensive Comparison (cell 14.9 redesign)
+
+Cell 14.9 runs 31 total experiments in 5 groups:
+
+**Groups 1-4 (16 experiments):** Use the active `DRIFT_FILTER_MODE` mask. Same as before:
+- Group 1: Unbalanced top-N by |differential| (N=100,200,400,800)
+- Group 2: Balanced N/2 F_H + N/2 F_S (N=100,200,400,800)
+- Group 3: EN 435 + top-K drift (K=50,100,200,400)
+- Group 4: Drift-filtered EN (theta=0.05,0.10,0.15,0.20)
+
+**Group 5 (15 experiments):** Smart subset — 5 filters × 3 strategies:
+
+| Filter \ Strategy | Unbalanced-200 | Balanced 100H+100S | EN+100 |
+|---|---|---|---|
+| none (raw 524K) | ✓ | ✓ | ✓ |
+| phase2_anova | ✓ | ✓ | ✓ |
+| temporal_variance | ✓ | ✓ | ✓ |
+| monotonicity | ✓ | ✓ | ✓ |
+| class_conditional | ✓ | ✓ | ✓ |
+
+Each experiment in Group 5 re-ranks features under its own filter mask, then selects using the strategy. This directly answers: "Which pre-filter produces the most useful drift features, and does the answer depend on the selection strategy?"
+
+Each experiment trains a fresh MLP (3 seeds, reports mean±std AUC). The `train_balanced_mlp()` function (defined in cell 14.8) is a general MLP training function reused across all experiments — the "balanced" name is historical.
+
+**Key question:** Given that pure drift features only reach 0.65-0.76 AUC regardless of ANOVA filtering, these temporal filters may produce cleaner drift features but are unlikely to close the gap with EN (0.94). The EN features capture static activation patterns that are inherently more discriminative than temporal trends for this task. These filters are worth testing for scientific understanding of drift but may not change the practical conclusion.
 
 ### 7.2 Intervention Design (Informed by 7.1 Results)
 
@@ -1146,15 +1346,16 @@ with model.trace(prompt_t):
 | 14.5 | **Feature drift analysis** | Per-feature Pearson correlation, early-vs-late delta, reclassify 435 features | Done |
 | 14.6 | **Threshold sweep + MLP gradient attribution** | Sweep θ ∈ [0.05, 0.30]; ∂D_t/∂input for high-D_t turns; cross-reference drift × importance | Done |
 | 14.7 | **Feature group ablation** | 8 zero-out experiments; data-driven vs layer-based comparison | Done |
-| 14.8 | **Full d_sae drift analysis** | Pearson correlation on all 524,288 features from `feature_matrix.npz`; proves F_S exists but was filtered by Elastic Net | Done |
-| 14.9 | **Balanced feature re-selection** | Select top-200 F_H + top-200 F_S from full d_sae by |corr|; create new balanced feature set | Done (AUC=0.606, negative result) |
-| 14.10 | **Retrain MLP on balanced features** | New MLP with F_H + F_S features; compare AUC vs old MLP | Done (AUC=0.606, negative result) |
-| 14.11 | **Differential drift analysis** | Compute drift on both classes; select top-N by |differential|; retrain MLP | TODO |
-| 14.12 | **Compute intervention targets** | Mean F_S activation during refusals, mean F_H activation during benign turns | TODO |
-| 14.13 | **Implement intervention hook** | NNSight hook with data-driven F_H/F_S clamping, triggered by D_t > τ | TODO |
-| 14.14 | **Run intervention evaluation** | Re-run attacks with hook active, judge-score per turn, measure ASR reduction | TODO |
-| 14.15 | **Utility evaluation** | XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts | TODO |
-| 14.16 | **Results & comparison** | Compare all baselines, plot score trajectory suppression | TODO |
+| 14.8 | **Full d_sae drift analysis** | Pearson correlation on all 524,288 features from `feature_matrix.npz`; proves F_S exists but was filtered by Elastic Net | Done (index bug fixed) |
+| 14.9 | **Balanced feature re-selection** | Select top-200 F_H + top-200 F_S from full d_sae by |corr|; create new balanced feature set | Done (index bug fixed, needs re-run) |
+| 14.10 | **Retrain MLP on balanced features** | New MLP with F_H + F_S features; compare AUC vs old MLP | Done (index bug fixed, needs re-run) |
+| 14.11 | **Differential feature selection + MLP retraining** | Diff-only, EN baseline, EN+top-K combined; uses `original_idx` for correct column mapping | Done (index bug fixed, needs re-run) |
+| 14.12 | **Diagnostic: AUC gap** | 6 tests comparing traj_ds vs fmat; confirmed index bug was root cause | Done (index bug fixed, needs re-run) |
+| 14.13 | **Compute intervention targets** | Mean F_H activation during benign turns (score < 2) as suppression baseline | TODO |
+| 14.14 | **Implement intervention hook** | NNSight hook: when D_t > τ, suppress F_H toward benign baseline via SAE decoder | TODO |
+| 14.15 | **Run intervention evaluation** | Re-run attacks with hook active, judge-score per turn, measure ASR reduction | TODO |
+| 14.16 | **Utility evaluation** | XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts | TODO |
+| 14.17 | **Results & comparison** | Compare all baselines, plot score trajectory suppression | TODO |
 
 **Output directory:** `results/intervention/`
 
