@@ -1278,6 +1278,150 @@ Each experiment trains a fresh MLP (3 seeds, reports mean±std AUC). The `train_
 
 **Key question:** Given that pure drift features only reach 0.65-0.76 AUC regardless of ANOVA filtering, these temporal filters may produce cleaner drift features but are unlikely to close the gap with EN (0.94). The EN features capture static activation patterns that are inherently more discriminative than temporal trends for this task. These filters are worth testing for scientific understanding of drift but may not change the practical conclusion.
 
+#### 7.1.10.6 Filter–Drift Selection Compatibility Concerns
+
+**Problem:** The temporal filters and the drift selection modes (jb_specific, differential) may be incompatible because they measure different things in different ways.
+
+**Issue 1: Class dilution in temporal_variance and monotonicity filters**
+
+Both filters average scores across ALL trajectories (JB + refused). But jb_specific drift selection specifically wants features that drift in JB and stay flat in refused. When a feature has high monotonicity in JB trajectories (rho=0.8) but is flat in refused (rho=0.05), the averaged score gets diluted:
+
+```
+Example F_H feature:
+  100 JB trajectories:  per-traj |Spearman| = 0.8
+  200 REF trajectories: per-traj |Spearman| = 0.05
+  → Monotonicity score = (100×0.8 + 200×0.05) / 300 = 0.30  ← may not make top-10K
+  → Class-conditional score = |0.8 - 0.05| = 0.75            ← easily makes top-10K
+```
+
+This means temporal_variance and monotonicity filters can **remove exactly the features that drift selection wants** — features that only drift in one class.
+
+**Issue 2: Pooled Pearson vs per-trajectory Spearman**
+
+Drift selection uses pooled Pearson correlation (all JB turns together). The filters use per-trajectory Spearman (within each trajectory, then averaged). These can disagree:
+
+- A feature with clear **overall trend** across all JB turns (pooled Pearson=0.5) but **noisy within short individual trajectories** (per-trajectory Spearman=0.15) would be filtered out — but it's a valid drift feature.
+- Short trajectories (3-4 turns) produce unreliable Spearman values, adding noise to filter scores.
+
+**Compatibility ranking of current filters:**
+
+| Filter | Compatible with jb_specific? | Compatible with differential? |
+|---|---|---|
+| none | N/A (no filtering) | N/A |
+| phase2_anova | Poor — ANOVA is static, orthogonal to drift | Poor |
+| temporal_variance | Poor — diluted by refused trajectories | Moderate |
+| monotonicity | Poor — diluted by refused trajectories | Moderate |
+| class_conditional | **Good** — directly measures JB vs refused difference | **Good** |
+
+**Potential improvement (not yet implemented):**
+
+Make temporal_variance and monotonicity class-aware by computing them on JB trajectories only (or separately per class), then selecting features based on JB-class scores rather than all-trajectory averages. This would align the filter's selection criterion with what drift selection actually looks for.
+
+```python
+# Current (class-agnostic, diluted):
+mono_score = mean(|rho| across ALL trajectories)
+
+# Improved (class-aware):
+mono_jb_score = mean(|rho| across JB trajectories only)
+# Use mono_jb_score for ranking instead of mono_score
+```
+
+Alternatively, increase FILTER_K from 10K to 50K to be less aggressive — the MLP can handle noise; the filter's job is removing dead/garbage features, not precise selection.
+
+**Resolution strategy:** Run cell 14.9 Group 5 with current filters first. If "none" consistently beats all filters, it confirms the filters are too aggressive or incompatible. If class_conditional beats others, it confirms class dilution is the issue. Results will determine whether to implement class-aware fixes.
+
+#### 7.1.10.7 Comprehensive Comparison Results (DRIFT_FILTER_MODE="none", all filters computed)
+
+**Full results from cell 14.9 (31 experiments):**
+
+**EN+100 augmented — filter comparison (Group 5):**
+
+| Filter | AUC | vs EN |
+|---|---|---|
+| phase2_anova | 0.9593±0.0027 | +0.0177 |
+| none | 0.9574±0.0017 | +0.0158 |
+| class_conditional | 0.9560±0.0076 | +0.0144 |
+| monotonicity | 0.9542±0.0068 | +0.0126 |
+| temporal_variance | 0.9448±0.0099 | +0.0031 |
+
+All filters produce similar EN+100 AUC (within ±0.015). Filters don't matter for augmented strategy — EN features dominate, the 100 drift features are a minor boost regardless of which 100 are picked.
+
+**Unbalanced-200 — filter comparison (Group 5):**
+
+| Filter | F_H/F_S split | AUC |
+|---|---|---|
+| temporal_variance | 95H+105S | 0.7362 |
+| phase2_anova | 0H+200S | 0.7261 |
+| none | 6H+194S | 0.7132 |
+| monotonicity | 22H+178S | 0.6955 |
+| class_conditional | 136H+64S | 0.6794 |
+
+Key insight: **each filter selects fundamentally different feature compositions.**
+- temporal_variance produces the most balanced H/S split and performs best for pure drift
+- class_conditional flips to F_H-dominated (136H/64S) — selects features whose temporal behavior differs between classes, which are mostly escalating features
+- none/phase2_anova are massively F_S-skewed (0-6 F_H out of 200)
+
+**Balanced 100H+100S — filter comparison (Group 5):**
+
+| Filter | AUC |
+|---|---|
+| temporal_variance | 0.7370 |
+| phase2_anova | 0.7110 |
+| monotonicity | 0.7027 |
+| class_conditional | 0.6919 |
+| none | 0.6743 |
+
+temporal_variance performs best here too, suggesting features that genuinely vary over time are slightly more useful than features selected by other criteria.
+
+**Top strategies overall (Groups 1-5 combined):**
+
+| Strategy | N | AUC | vs EN |
+|---|---|---|---|
+| EN+50 drift (none) | 485 | 0.9638±0.0041 | +0.0222 |
+| EN+400 drift (none) | 835 | 0.9594±0.0095 | +0.0178 |
+| EN+100 [phase2_anova] | 535 | 0.9593±0.0027 | +0.0177 |
+| EN+100 [none] | 535 | 0.9574±0.0017 | +0.0158 |
+| EN baseline | 435 | 0.9416 | ref |
+| Best pure drift | 200 | 0.7370±0.0214 | -0.2046 |
+
+**Conclusions:**
+
+1. **EN features are the core classifier.** All EN+K strategies beat 0.94; all pure-drift strategies below 0.74. The gap (~0.20 AUC) is robust across all filters and strategies.
+
+2. **Drift augmentation provides marginal improvement.** EN+50 (0.9638) is best, but the +0.022 gain is within noise given ~67 val trajectories (SE ~0.02-0.03).
+
+3. **No filter breaks through the drift ceiling.** The best pure-drift AUC (0.7370 with temporal_variance balanced) is far below EN. The problem isn't feature pre-filtering — drift features are inherently less discriminative than static EN features for this task.
+
+4. **Compatibility prediction was partially wrong.** class_conditional was predicted to be most compatible but performed worst for pure-drift strategies. It selects F_H-heavy features that are individually less discriminative than F_S-heavy selections.
+
+5. **temporal_variance is the best pure-drift filter** — produces balanced H/S split and highest pure-drift AUC. But the improvement over "none" is small (0.74 vs 0.71).
+
+6. **Recommended default: `DRIFT_FILTER_MODE = "none"`.** Filtering adds complexity without meaningful gain. The simplest EN+50 or EN+100 with no filter is near-optimal.
+
+7. **Class-aware filter improvement (7.1.10.6) is deprioritized.** Since no filter meaningfully helps, refining the filter design has low expected value. Effort is better spent on the intervention phase (7.2).
+
+### 7.1.10.8 MLP Training in 14.9 — No Hyperparameter Tuning
+
+All 31 experiments in cell 14.9 train **fresh MLPs from scratch** via `run_experiment()` → `train_balanced_mlp()`. The Phase 3 MLP is **not reused** — it only appears as a reference baseline (horizontal line on plots).
+
+**Fixed hyperparameters across all experiments:**
+
+| Parameter | Value |
+|-----------|-------|
+| Hidden layers | `[64, 32]` |
+| Dropout | 0.2 |
+| LR | 1e-3 |
+| Epochs | 50 |
+| Early stopping | patience=10 |
+| Seeds | 3 (42, 123, 456) |
+
+**What varies:** only which features are selected (100–800 features).
+**What does NOT vary:** architecture, LR, dropout — all hardcoded.
+
+**Implication:** The current comparison only tests feature selection, not MLP design. A suboptimal architecture could mask good feature sets. Phase 4 inherits the Phase 3 MLP as-is (as trigger), so if the MLP is suboptimal, intervention quality is also affected.
+
+**Potential improvement (low priority):** Optuna hyperparameter search on best feature set (EN+100), then apply found hyperparams to all experiments. Deprioritized — current AUC (0.96) is already high.
+
 ### 7.2 Intervention Design (Informed by 7.1 Results)
 
 **Confirmed scenario: Scenario B — F_H escalation dominates detection.**

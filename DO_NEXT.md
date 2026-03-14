@@ -1,142 +1,98 @@
-# DO_NEXT — Phase 4 Status & Next Steps
+# DO_NEXT — Status & Next Steps
 
-**Last updated:** 2026-03-13
-**Notebook:** `cross_layer_causal_sae_jailbreak_detection_V-1.3.ipynb` (101 cells)
-
----
-
-## RESOLVED: Section 14 Bugs (5 issues found, 4 fixed)
-
-**Correct baseline AUC: 0.9416** (from Phase 3 checkpoint, val-only)
-
-### Bug Summary
-
-| # | Bug | Cells | Impact | Fixed? |
-|---|-----|-------|--------|--------|
-| 1 | Index mapping (block vs interleaved) | 96,97,99,100 | Wrong features used, EN AUC=0.675 instead of ~0.94 | Yes |
-| 2 | Eval leakage (train+val combined) | 95,98 | AUC inflated 0.9416→0.982 | Yes |
-| 3 | Train/val split (goal overlap) | 97 | Only 8 val trajectories instead of ~61 | Yes |
-| 4 | valid_mask not applied | 97 | jb_specific `\|corr_ref\| < THETA_FLAT` filter bypassed | Yes |
-| 5 | Acc/F1 threshold mismatch | 95 | Acc/F1 unreliable (AUC unaffected) | No — AUC is primary metric |
-
-### Bug 1: Index Mapping (cells 96, 97, 99, 100)
-
-Code assumed `feature_matrix.npz` uses interleaved layout, but it uses block layout:
-```
-ACTUAL (block):      [L9_raw, L17_raw, L22_raw, L29_raw, L9_delta, L17_delta, L22_delta, L29_delta]
-ASSUMED (interleaved): [L9_raw, L9_delta, L17_raw, L17_delta, ...]
-```
-Wrong formula: `gi = layer_idx * 2 * d_sae + ...`
-Correct formula: `gi = (n_layers * d_sae if is_delta else 0) + layer_idx * d_sae + sae_idx`
-Or: use `original_idx` from `feature_sets.json`.
-
-Verified: `original_idx` gives Pearson r=1.0000 between `feature_matrix.npz` and `trajectory_dataset.pt`.
-
-### Bug 2: Eval Leakage (cells 95, 98)
-
-- Cell 95 (14.7): `for d in dataset` evaluated on train+val combined → AUC=0.982 (inflated). Fixed to `for d in val_dataset`.
-- Cell 98 (14.10): `for d in bal_train + bal_val` in EVALUATION section. Fixed to `for d in bal_val`.
-
-### Bug 3: Train/Val Split (cell 97)
-
-Split by `if goal in train_goals` (checked first), but 42 of 46 val goals also exist in train_goals (same goal appears in multiple trajectories). Result: only 8 val trajectories.
-Fixed: trajectory-signature matching `(goal, tuple(int(scores)))` → ~61 val trajectories. Same method used in cells 99/100.
-
-### Bug 4: valid_mask Not Applied (cell 97)
-
-Cell 14.9 selected features from raw `corr_full` without applying `valid_mask_saved`. In `jb_specific` mode, `valid_mask` enforces `|corr_ref| < THETA_FLAT` — without it, features that drift in both JB and refused could be selected, defeating the purpose.
-Fixed: apply `corr_full_saved` + `valid_mask_saved`, zero out invalid features before selection.
-
-### Bug 5: Acc/F1 Threshold Mismatch (cell 95) — NOT FIXED
-
-MLP trained with soft labels (`score/10`), but acc/F1 use `preds > 0.5` threshold. A turn with score=6 produces pred~0.6 > 0.5 → false positive, since ground truth is `score > 8`. Correct threshold would be ~0.8.
-**AUC is unaffected** (rank-based, threshold-independent). Since AUC is the primary comparison metric for ablation experiments, this is low priority.
-
-### What was NOT affected
-
-- **Drift correlation values (14.5, 14.8)** — operate on full 524K matrix directly, no manual index mapping
-- **Phase 3 pipeline (cells 13.x)** — uses its own extraction, never touches `feature_matrix.npz` indices
+**Last updated:** 2026-03-14
+**Notebook:** `cross_layer_causal_sae_jailbreak_detection_V-1.4.ipynb`
 
 ---
 
-## Experimental Results Summary (Phase 4)
+## Bug Warnings (Resolved — Keep as Reference)
 
-### Drift Analysis (cells 14.5, 14.8)
+These bugs were found and fixed in V-1.3 → V-1.4. Keep as warnings to avoid reintroduction.
 
-| Analysis | Method | F_H | F_S | Key insight |
-|----------|--------|-----|-----|-------------|
-| 435-feature jb-only | Pearson corr (jailbroken only) | 309 | 3 | Most features escalate during jailbreaks |
-| 435-feature differential | corr_jb - corr_refused | 294 | 2 | Refused barely drifts (mean=0.016), so differential ≈ jb-only |
-| Full d_sae jb-only (524K) | Pearson corr (jailbroken only) | 32,948 | 19,728 | F_S exists in bulk but was filtered by EN |
-| Full d_sae differential | corr_jb - corr_refused | 33,629 | 42,772 | **F_S outnumbers F_H** — many features erode in jb AND strengthen in refused |
+| # | Bug | Root Cause | Prevention |
+|---|-----|-----------|------------|
+| 1 | **Index mapping** | Block layout assumed interleaved → wrong features selected | Always use `original_idx` from `feature_sets.json`, never compute indices manually |
+| 2 | **Eval leakage** | Evaluated on train+val combined → inflated AUC | All evaluation code must use `val_dataset` / `val_rows` only |
+| 3 | **Train/val split** | Goal-string matching caused overlap (42/46 goals shared) | Use trajectory-signature `(goal, tuple(int(scores)))` for split |
+| 4 | **valid_mask not applied** | Feature selection bypassed `jb_specific` filter | Apply `valid_mask` immediately after computing correlations |
+| 5 | **Acc/F1 threshold** | Soft-label model uses 0.5 threshold but ground truth is score>8 | Report AUC only (rank-based, threshold-independent) |
 
-### Why drift correlation fails as feature selection
+**Layout reference:**
+```
+CORRECT (block):  [L9_raw, L17_raw, L22_raw, L29_raw, L9_delta, L17_delta, L22_delta, L29_delta]
+WRONG (interleaved): [L9_raw, L9_delta, L17_raw, L17_delta, ...]
+```
 
-Drift correlation (even differential) is **univariate** — it ranks each feature independently. Elastic Net is **multivariate** — it finds feature *combinations* that jointly predict the label.
+---
 
-| Property | Drift Correlation | Elastic Net |
-|----------|------------------|-------------|
-| Sees refused data? | No (jb-only) / Yes (differential) | Yes |
-| Selection criterion | Per-feature temporal trend | Joint cross-class prediction |
-| Considers feature interactions? | No (univariate) | Yes (multivariate) |
-| What it finds | Features that change over time | Features that distinguish classes |
+## Memory Bottlenecks for Multi-Run Scaling
 
-### MLP Retraining Results (cell 14.11, fixed val split)
+When scaling from 1 run (100 trajectories, ~2135 turns) to N runs, memory scales linearly with total turns. Current data: ~4.2 GB RAM for X_full. At 10 runs: ~42 GB.
 
-**INVALIDATED** — all results below used wrong column indices (the index bug above). Need to re-run with corrected code.
+### Critical Bottlenecks
 
-| Experiment | N feat | AUC mean | AUC std | Status |
-|---|---|---|---|---|
-| **Elastic Net 435 (baseline)** | **435** | **0.675** | **0.021** | INVALID — wrong columns |
-| EN 435 + top-100 diff | 535 | 0.685 | 0.033 | INVALID |
-| EN 435 + top-50 diff | 485 | 0.660 | 0.049 | INVALID |
-| EN 435 + top-200 diff | 635 | 0.613 | 0.041 | INVALID |
-| Diff-only 435 | 435 | 0.585 | 0.053 | INVALID |
-| Diff-only 200 | 200 | 0.542 | 0.038 | INVALID |
-| Balanced drift 200+200 | 400 | 0.606 | — | INVALID |
+| # | Phase | Cell | Problem | Current (1 run) | At 10 runs | Fix |
+|---|-------|------|---------|-----------------|------------|-----|
+| 1 | **Phase 2** | 54 | `X_rows` list accumulates all turns in RAM before `np.stack()` | 4.2 GB | **~42 GB** | Stream to `np.memmap` instead of list accumulation |
+| 2 | **Phase 2** | 55 | `np.savez_compressed` needs array + compression buffer | ~7 GB peak | **~70 GB** | Use `np.save` (uncompressed) or `np.memmap` |
+| 3 | **Phase 2** | 56 | `X`, `X_stage1`, `X_stage2`, `X_scaled` coexist | ~8 GB | **~80 GB** | `del` intermediates after each stage |
+| 4 | **Phase 4** | 94 | `vectorized_pearson` creates centered copy `X_c = X - X_mean` | ~9 GB | **~90 GB** | Chunk computation (50K features at a time) or `np.memmap` |
+
+### Recommended Fixes by Scale
+
+**2-3 runs (~6K turns, ~12 GB):** Add `del` statements to free intermediate arrays in Cell 56. Should fit in 32 GB RAM.
+
+**10 runs (~21K turns, ~42 GB):**
+1. **Cell 54:** Replace `X_rows` list with `np.memmap`:
+   ```python
+   X_mmap = np.memmap("feature_matrix.dat", dtype='float32', mode='w+', shape=(total_turns, 524288))
+   # Write each row directly: X_mmap[row_idx] = x_t
+   ```
+2. **Cell 55:** Save as uncompressed `.npy` or keep memmap file directly.
+3. **Cell 56:** Delete intermediates: `del X` after creating `X_stage1`, etc.
+4. **Cell 94:** Chunk `vectorized_pearson` to process 50K features at a time instead of all 524K.
+
+### Not Bottlenecks
+
+| Phase | Why it's fine |
+|-------|--------------|
+| Phase 1 (Crescendomation) | GPU fixed at 7-8 GB (model size). Text trajectories are tiny. Per-run save already implemented. |
+| Phase 3 (MLP training) | Dataset is 435 features per turn (~1.7 KB/turn). Even 10 runs = ~30 MB. |
+| Disk space | Compressed feature matrix: ~800 MB/run. 10 runs ≈ 8 GB. Manageable. |
 
 ---
 
 ## What To Do Next
 
-### Priority 1: Proceed to Intervention (cells 14.13–14.17)
-
-Accept Elastic Net 435 with the Phase 3 pipeline (val AUC=0.9416) as the final feature set and proceed with F_H suppression. Renumber from 14.13 since 14.12 is now the diagnostic cell.
+### Priority 1: Intervention Phase (Section 7.2 in RESEARCH_PLAN)
 
 | Cell | Task | Description |
 |------|------|-------------|
-| 14.13 | Compute intervention targets | Mean F_H activation during benign turns (score < 2) as suppression baseline |
-| 14.14 | Implement intervention hook | NNSight hook: when D_t > τ, suppress F_H features toward benign baseline via SAE decoder |
-| 14.15 | Run intervention evaluation | Re-run Crescendo attacks with hook active, measure ASR reduction |
-| 14.16 | Utility evaluation | XSTest (BRR), MMLU, GSM8K on intervened model |
-| 14.17 | Results & comparison | Compare all baselines, plot score trajectory suppression |
+| 14.10 | Compute intervention targets | Mean F_H activation during benign turns (score < 2) as suppression baseline |
+| 14.11 | Implement intervention hook | NNSight hook: when D_t > τ, suppress F_H toward benign baseline via SAE decoder |
+| 14.12 | Run intervention evaluation | Re-run Crescendo attacks with hook active, measure ASR reduction |
+| 14.13 | Utility evaluation | XSTest (BRR), MMLU, GSM8K on intervened model |
+| 14.14 | Results & comparison | Compare baselines, plot score trajectory suppression |
 
-**Key design decisions (from RESEARCH_PLAN.md Section 7.2):**
-- **Trigger:** D_t > τ (τ=0.4 for best F1, or τ=0.6 for zero FPR)
-- **Mechanism:** Subtract-only on F_H features: `correction = target - current` only when `current > target`
-- **Target values:** Mean activation during benign early turns (score < 2)
-- **Injection:** Decode correction through SAE decoder into residual stream
+### Priority 2: Phase 3 Ablations (Lower Priority)
 
-### Priority 2: Re-run cells 14.9–14.12 with corrected indices
+- SWiM window size (M ∈ {4, 8, 16, 32})
+- Within-turn pooling (max vs mean vs last-token)
+- MLP hyperparameter tuning (Optuna on EN+100 feature set — see RESEARCH_PLAN 7.1.10.8)
 
-Now that the index bug is fixed, re-run all experiments to get correct results. EN baseline should now match Phase 3's ~0.94+ AUC.
+### Priority 3: Implement Memory Fixes (Before Scaling)
 
-### Priority 3: Phase 3 pending ablations (lower priority)
-
-- SWiM window size ablation (M ∈ {4, 8, 16, 32}) — cell 13.10.4
-- Within-turn pooling ablation (max vs mean vs last-token) — cell 13.10.5
-- These can be done independently and don't block intervention
+Apply the bottleneck fixes above before running `NUM_RUNS > 1`.
 
 ---
 
 ## File Reference
 
-| File | Description | Trust level |
-|------|-------------|-------------|
-| `results/mlp_detector/trajectory_dataset.pt` | Phase 3 train/val dataset (435 features, per-trajectory) | **PRIMARY — use this** |
-| `results/mlp_detector/best_model.pt` | Phase 3 MLP checkpoint (val AUC=0.9416) | **PRIMARY** |
-| `results/feature_discovery/feature_matrix.npz` | 2135 × 524,288 full SAE features (Phase 2) | **Valid — use `original_idx` for EN column mapping** |
-| `results/feature_discovery/feature_matrix_meta.json` | Metadata with `turn_meta` per-row mapping | Valid for metadata, not for feature values |
-| `results/feature_discovery/feature_sets.json` | 435 Elastic Net features (F_H + F_S definitions) | Valid |
-| `results/intervention/` | Phase 4 outputs (drift, attribution, ablation, differential, diagnostic) | Valid |
-| `reference/RESEARCH_PLAN.md` | Full research plan with all findings | Valid |
+| File | Description |
+|------|-------------|
+| `results/mlp_detector/trajectory_dataset.pt` | Phase 3 train/val dataset (435 features, per-trajectory) |
+| `results/mlp_detector/best_model.pt` | Phase 3 MLP checkpoint (val AUC=0.9416) |
+| `results/feature_discovery/feature_matrix.npz` | 2135 × 524,288 full SAE features |
+| `results/feature_discovery/feature_matrix_meta.json` | Metadata with `turn_meta` per-row mapping |
+| `results/feature_discovery/feature_sets.json` | 435 Elastic Net features (F_H + F_S definitions) |
+| `reference/RESEARCH_PLAN.md` | Full research plan with all findings |
