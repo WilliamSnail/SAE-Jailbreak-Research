@@ -321,7 +321,7 @@ Z_late_t  = sae_late.encode(h_late.squeeze(0).float())    # (seq_len, d_sae)
 │      6. Free GPU memory immediately after encoding            │
 │                                                               │
 │  Advantages:                                                  │
-│  • No 160GB+ disk footprint (100 traj × 8 turns × 200MB)     │
+│  • No large disk footprint from pre-saved activations         │
 │  • Enables data augmentation (random token masking, etc.)     │
 │  • Always uses latest SAE weights if fine-tuning              │
 │  • Matches CC++ recommended practice                          │
@@ -857,7 +857,9 @@ A positive latency means the detector triggers before the model outputs harmful 
 
 ---
 
-## 7. Phase 4 — Data-Driven Feature Attribution & Conditional Intervention (Status: In Progress)
+## 7. Phase 4 — Data-Driven Feature Attribution (Status: Complete)
+
+> **See `DO_NEXT.md` for immediate issues:** memory bottlenecks for multi-run scaling, bug warnings, and prioritized next steps.
 
 ### 7.0 Motivation: Why the Layer-Based F_H/F_S Split Is Insufficient
 
@@ -1274,6 +1276,12 @@ Cell 14.9 runs 31 total experiments in 5 groups:
 
 Each experiment in Group 5 re-ranks features under its own filter mask, then selects using the strategy. This directly answers: "Which pre-filter produces the most useful drift features, and does the answer depend on the selection strategy?"
 
+**Group 6 (baseline): Linear probe (logistic regression)**
+- Train `sklearn.linear_model.LogisticRegression` on the same feature sets as a detection baseline
+- Tests: EN-435, EN+100, top-200 drift (unbalanced), top-200 drift (balanced)
+- Validates whether our MLP's non-linear capacity is necessary or if a single direction suffices
+- Expected: linear probe competitive on EN-435 (strong features), worse on drift features (non-linear interactions needed)
+
 Each experiment trains a fresh MLP (3 seeds, reports mean±std AUC). The `train_balanced_mlp()` function (defined in cell 14.8) is a general MLP training function reused across all experiments — the "balanced" name is historical.
 
 **Key question:** Given that pure drift features only reach 0.65-0.76 AUC regardless of ANOVA filtering, these temporal filters may produce cleaner drift features but are unlikely to close the gap with EN (0.94). The EN features capture static activation patterns that are inherently more discriminative than temporal trends for this task. These filters are worth testing for scientific understanding of drift but may not change the practical conclusion.
@@ -1422,7 +1430,13 @@ All 31 experiments in cell 14.9 train **fresh MLPs from scratch** via `run_exper
 
 **Potential improvement (low priority):** Optuna hyperparameter search on best feature set (EN+100), then apply found hyperparams to all experiments. Deprioritized — current AUC (0.96) is already high.
 
-### 7.2 Intervention Design (Informed by 7.1 Results)
+---
+
+## 8. Phase 5 — Conditional Intervention (Status: TODO)
+
+> **See `DO_NEXT.md` for immediate issues:** memory bottleneck fixes needed before scaling beyond ~7 total runs (currently at 4 runs, 16 GB RAM machine).
+
+### 8.1 Intervention Design (Informed by Phase 4 Results)
 
 **Confirmed scenario: Scenario B — F_H escalation dominates detection.**
 
@@ -1446,6 +1460,86 @@ where `D_t` is the raw MLP output (no output EMA — ablation 13.10.3 showed α_
 
 **Threshold:** τ=0.4 (best F1=0.949) or τ=0.6 (zero FPR) from Phase 3 sweep.
 
+#### 7.2.1.1 Intervention Timing: Input-Context vs Per-Token
+
+Two designs for when to compute D_t and apply the correction during generation:
+
+**Design A: Input-context detection (before generation)**
+
+```
+Turn t conversation:
+[system] [user1] [asst1] [user2] [asst2] [user_t] <start_of_turn>model
+                                                    ↑
+                                           Trace 1: extract features HERE
+                                           SAE encode → SWiM → MLP → D_t
+                                           D_t is a real number (not proxy)
+                                           ↓
+                                     if D_t > τ:
+                                           Trace 2 (generate): inject FIXED correction at every token
+                                     else:
+                                           Trace 2 (generate): normal generation, no hook
+```
+
+- Features come from how the model **encodes the conversation history** up to the current user prompt
+- The model's hidden states at layers [9,17,22,29] already shift when reading escalating prompts — F_H features fire up before generation begins
+- Detection uses a **read-only trace** with `.save()` to extract hidden states as real tensors, then SAE encode / SWiM / MLP all happen as normal Python on real tensors
+- The correction vector is **fixed** for the entire generation — same vector added at every token
+- **NNSight advantage:** D_t is a real number between traces, so Python `if D_t > τ` works normally (no proxy control-flow issue)
+
+**Design B: Per-token detection (during generation)**
+
+```
+Turn t generation:
+[system] [user1] [asst1] [user_t] <start_of_turn>model  Sure,  here's  how  to
+                                                         ↑      ↑       ↑     ↑
+                                                   token1  token2  token3  token4...
+                                                   extract features at EACH token
+                                                   SAE encode → MLP → D_t at EACH step
+                                                   dynamically adjust correction per token
+```
+
+- Features are re-extracted at every generated token
+- As the model generates tokens, its own output further shifts internal representations (self-reinforcing escalation)
+- D_t could cross τ mid-response — correction adapts dynamically
+- **NNSight constraint:** All computation (SAE encode at 4 layers, SWiM, MLP forward, threshold) must happen as **proxy operations** inside the generate context. Python control flow (`if/else`) cannot be used on proxy values (NNSight Gotcha #3). Must use tensor masking: `trigger = (D_t > tau).float(); h += trigger * correction`
+- **Fragile because:** 4× SAE encode + MLP inference as proxy ops at every token, no debugging visibility (`print()` doesn't work on proxies), delta features require external EMA state to enter the proxy graph, SWiM pooling across sequence as proxy math
+
+**Comparison:**
+
+| | Input-context (Design A) | Per-token (Design B) |
+|---|---|---|
+| When D_t computed | Once, before generation | Every generated token |
+| Correction | Fixed vector for all tokens | Can change per token |
+| Compute cost | 1 extra forward pass | SAE encode + MLP at every token |
+| Debuggability | Full (real tensors between traces) | None (proxy values) |
+| Implementation | Clean (two NNSight traces) | Fragile (all proxy math) |
+| Catches input escalation | Yes | Yes |
+| Catches self-escalation during output | No | Yes |
+
+**Decision: Design A (input-context detection).**
+
+The Crescendo attack works by the **attacker** gradually escalating across turns — the model's harmful output is a *result* of input-context drift, not a cause. By the time the model starts generating at turn t, its hidden states already reflect the accumulated escalation from turns 1..t. Self-reinforcing escalation during a single generation is not the primary threat vector for multi-turn attacks. Design A is sufficient for our threat model and avoids the NNSight proxy fragility of Design B.
+
+If empirical results show cases where the model starts safe but self-escalates mid-response, Design B can be revisited as a follow-up.
+
+#### 7.2.1.2 NNSight Implementation Gotcha: Layer Access Order in Corrections Dict
+
+When computing per-layer correction vectors by iterating over causal drivers, the resulting dict's insertion order depends on which layer's driver appears first in the driver list — **not** on layer number. If driver #0 maps to layer 29 and driver #50 maps to layer 9, the dict is ordered `{29: ..., 9: ...}`. Iterating this dict inside a `model.generate()` context accesses layer 29 before layer 9, violating NNSight's forward-pass order requirement → `OutOfOrderError`.
+
+**Fix:** Always iterate corrections in sorted layer order:
+```python
+for layer in sorted(corrections.keys()):
+    model.model.language_model.layers[layer].output[0][:, -1] += corrections[layer]
+```
+
+This applies to any intervention that touches multiple layers inside a trace/generate context. See also NNSight reference Gotcha #10.
+
+#### 7.2.1.3 NNSight Implementation Gotcha: GPU Memory Leak in Multi-Round Loops
+
+Each NNSight `model.trace()` / `model.generate()` allocates KV caches and intermediate tensors. In a multi-round attack loop (e.g., Crescendo with 8+ rounds), these accumulate and silently exhaust VRAM — the kernel dies with no error message.
+
+**Fix:** Add `gc.collect()` + `torch.cuda.empty_cache()` after every round. This frees temporary computation artifacts (KV caches, proxy graphs, intermediate SAE tensors) while keeping the model weights loaded.
+
 #### 7.2.2 Residual Stream Injection via SAE Decoder
 
 When triggered, decode the feature-level correction through the SAE decoder to get a residual stream correction:
@@ -1467,7 +1561,157 @@ with model.trace(prompt_t):
 **Add-only semantics for F_S:** Only inject if `current < target` (feature is suppressed below refusal level).
 **Subtract-only semantics for F_H:** Only inject if `current > baseline` (feature is elevated above benign level).
 
-### 7.3 Baselines to Compare Against
+#### 8.1.1 Phase 4→5 Handoff: Aggregation & Data Flow
+
+Cell 14.13 aggregates all Phase 4 outputs into a single `phase4_handoff.pt` so Phase 5 (Section 15) can load one file.
+
+**IMPORTANT:** Feature counts are NOT constant across re-runs. Elastic Net sparsity depends on data — re-running with more runs may produce a different number of features (not necessarily 435) and different causal driver counts (not necessarily 131). All downstream code reads these values dynamically from `feature_sets.json` and `phase4_handoff.pt`. Only comments/labels reference specific numbers.
+
+```python
+phase4_handoff = {
+    "detector": {                              # Phase 3 MLP as trigger
+        "model_path": "best_model.pt",
+        "n_features": N_FEATURES,              # dynamic (435 with current 4-run data)
+        "feature_sets_path": "feature_sets.json",
+        "val_auc": float(phase3_val_auc),      # dynamic
+        "threshold_options": {0.4: "best_F1", 0.6: "zero_FPR"},
+    },
+    "intervention_targets": {                  # causal drivers from MLP gradient attribution
+        "causal_driver_local_indices": [...],   # indices into N_FEATURES (131 with current data)
+        "causal_driver_global_indices": [...],  # indices into 524K feature matrix
+        "n_drivers": len(causal_drivers),       # dynamic
+        "strategy": "F_H_suppression_only",     # informed by 14.8 negative result
+    },
+    "benign_baselines": {                      # suppress toward what
+        "mean_activation_per_driver": [...],   # y_hard==0 pool (scores 0-8)
+        "pool": "y_hard==0 (scores 0-8)",      # per-turn label, not per-trajectory
+        "ablation": {                          # for comparison in Phase 5
+            "score_lt2_only": [...],           # strict subset of primary (scores 0-1)
+            "turn1_only": [...],              # first turn of each trajectory
+        },
+    },
+    "phase4_findings": {                       # context
+        "balanced_mlp_auc": 0.60,
+        "best_14_9_experiment": "EN+50 drift augmented",
+        "phase3_val_auc": float(phase3_val_auc),
+    },
+}
+```
+
+**Phase 5 execution flow:**
+
+```
+Input prompt → Model forward pass
+                   │
+        ┌──────────┴──────────┐
+        │  Extract N SAE      │
+        │  features at hook   │
+        └──────────┬──────────┘
+                   │
+        ┌──────────┴──────────┐
+        │  MLP(features) → D_t │  ← detector from handoff
+        └──────────┬──────────┘
+                   │
+             D_t > τ ?           ← threshold from handoff
+              │      │
+             NO      YES
+              │       │
+           pass    ┌──┴──────────────┐
+         through   │ For each causal │  ← causal_driver_indices
+                   │ driver:         │    (n_drivers from handoff)
+                   │ current-baseline│  ← benign_baselines
+                   │ if Δ > 0: clamp │
+                   └──┬──────────────┘
+                      │
+                   SAE decoder → residual stream correction
+```
+
+### 8.2 Intervention Feature Set Ablation
+
+The current plan intervenes on 131 causal drivers (subset of 435 EN features). We should ablate whether expanding the intervention surface improves ASR reduction.
+
+| Intervention set | # Features | Trigger MLP | What it tests |
+|---|---|---|---|
+| **131 causal drivers** (from 435 EN) | 131 | EN-435 MLP | Minimal targeted intervention (current plan) |
+| **All 435 EN features** | 435 | EN-435 MLP | Is causal driver filtering necessary? |
+| **EN+100 causal drivers** | ~150-200 | EN+100 MLP (retrained) | Do drift features add intervention power? |
+| **EN+100 all features** | 535 | EN+100 MLP (retrained) | Maximum intervention surface |
+
+**To implement EN+100 variants:**
+1. Top-100 drift features not in EN are already identified in 14.9 (group 3, `EN+100` experiment)
+2. Re-run gradient attribution (14.4) on the EN+100 MLP to find new causal drivers in the expanded set
+3. Compute benign baselines (`y_hard==0` pool) for all 535 features
+4. Store multiple intervention target sets in `phase4_handoff.pt`
+
+**Key question:** Do the 100 extra drift features provide new intervention targets (high-drift features the EN missed), or are they redundant with the existing 131 causal drivers?
+
+### 8.3 Linear Probe vs MLP: Detection and Intervention
+
+#### Why MLP over linear probe for detection
+
+A linear probe (logistic regression) learns a single direction `y = sigmoid(w · x + b)`. The most prominent example is Arditi et al. (2024), who found that **refusal is mediated by a single direction** in the residual stream — projecting onto it can detect and toggle refusal.
+
+However, for multi-turn jailbreak detection, linear probes have key limitations:
+
+- **Non-linear encoding:** Wei et al. (2024) directly compared linear vs MLP probes for jailbreak detection. MLP-guided interventions achieve higher attack success rate reduction. Jailbreak features are encoded **non-linearly** in prompt representations.
+- **Cross-attack generalization:** Linear probes achieve ~93% accuracy within a known attack style but **fail to generalize across unseen attack types** (Wei et al., 2024). Different jailbreak methods exploit different, non-linear feature combinations.
+- **Multi-turn transitions:** Our crescendo attack has score transitions (1→1→1→9→10) requiring AND/NOT conditions across turns — a linear probe cannot learn these temporal interactions.
+
+Cell 14.9 Group 6 adds a logistic regression baseline to quantify this gap empirically.
+
+#### Why linear intervention (refusal direction) is insufficient for our goal
+
+Our goal is not to toggle refusal on/off, but to **delay jailbreak past MAX_ROUNDS=8** or keep output safe. This requires conditional, gradual intervention — not a binary switch.
+
+| | Refusal direction (linear) | Our method (MLP + causal drivers) |
+|---|---|---|
+| **Mechanism** | Add/remove a single direction in residual stream | Suppress specific F_H features toward benign baseline |
+| **Granularity** | All-or-nothing (refusal on/off) | Per-feature, magnitude-proportional |
+| **Trigger** | Always active or manually toggled | Conditional on D_t > τ (zero cost when benign) |
+| **Multi-turn awareness** | Same direction every turn, no temporal state | Tracks drift via EMA across turns |
+| **Benign prompt impact** | Over-refuses if direction is always added | Zero intervention when D_t < τ |
+| **Goal alignment** | Forces refusal (model says "I can't do that") | Suppresses escalation (model stays helpful but safe) |
+
+The refusal direction is a **blunt on/off switch** for refusal behavior. Our method is a **thermostat** — it only activates when escalation is detected, and suppresses proportionally to how far features have drifted from baseline.
+
+#### References
+
+- Arditi et al. (2024). [Refusal in Language Models Is Mediated by a Single Direction](https://arxiv.org/abs/2406.11717). NeurIPS 2024.
+- Wei et al. (2024). [What Features in Prompts Jailbreak LLMs? Investigating the Mechanisms Behind Attacks](https://arxiv.org/abs/2411.03343). BlackboxNLP 2025.
+- O'Brien et al. (2024). [Steering Language Model Refusal with Sparse Autoencoders](https://arxiv.org/pdf/2411.11296).
+- Li et al. (2025). [Sparse Autoencoders are Capable LLM Jailbreak Mitigators](https://arxiv.org/html/2602.12418).
+
+#### Comparison with CC-Delta (Assogba et al., 2026)
+
+[Sparse Autoencoders are Capable LLM Jailbreak Mitigators](https://arxiv.org/abs/2602.12418) — closest related work. Uses SAE feature-space steering ("Context-Conditioned Delta Steering") to mitigate jailbreaks.
+
+**How CC-Delta works:** Compare activations of same harmful prompt with/without jailbreak wrapping → Wilcoxon test finds shifted SAE features → always steer those features by fixed α·Δ during inference.
+
+| Aspect | CC-Delta | Ours |
+|---|---|---|
+| Threat model | Single-turn jailbreak wrapping | Multi-turn crescendo escalation |
+| Trigger | Always-on (every prompt) | Conditional (D_t > τ, zero benign cost) |
+| Feature selection | Statistical (Wilcoxon on prompt pairs) | Learned (EN + drift + gradient attribution) |
+| Intervention | Fixed mean-shift (linear) | Proportional suppression toward baseline |
+| Requires template pairs | Yes (harmful ⊂ jailbreak as substring) | No (works on any attack surface) |
+| Training needed | None (statistical only) | MLP training + multi-phase pipeline |
+| Models tested | 4 models, 12 attacks | 1 model, 1 attack (so far) |
+| OOD generalization | Tested | Not yet tested |
+
+**Their key validation for us:** "Off-the-shelf SAEs trained for interpretability can be repurposed as practical jailbreak defenses" — confirms our core premise.
+
+**Our advantages:** Conditional triggering (no utility cost on benign), multi-turn awareness (EMA drift tracking), handles paraphrased/rewritten attacks (no substring requirement).
+
+**Their advantages:** Simpler pipeline, broader evaluation (4 models × 12 attacks), no training required.
+
+#### Lessons to incorporate from CC-Delta
+
+1. **Add CC-Delta as a baseline in Phase 5** — implement their always-on mean-shift steering as a comparison method. This directly tests whether conditional triggering beats always-on steering.
+2. **Test OOD attack generalization** — after Phase 5 works on crescendo, evaluate on 2-3 other attack types (e.g., PAP, TAP, GCG) without retraining. CC-Delta showed OOD is where methods diverge most.
+3. **Evaluate IFEval** — CC-Delta found instruction-following (not MMLU) is the primary utility cost. Add IFEval to our utility evaluation (cell 14.16).
+4. **Multi-model evaluation** — if time permits, test on Llama-3.1-8B and Qwen-2.5-7B to show method generality.
+
+### 8.4 Baselines to Compare Against
 
 | Method | Description | Expected weakness |
 |---|---|---|
@@ -1476,9 +1720,10 @@ with model.trace(prompt_t):
 | F_S-only restoration | Only restore eroding features | Tests F_S contribution alone |
 | F_H-only suppression | Only suppress escalating features | Tests F_H contribution alone |
 | Dense projection cap ("Assistant Axis") | Cap activation magnitude on assistant axis | Blunt instrument, some over-refusal |
-| **This method** | Data-driven conditional clamping (F_H↓ + F_S↑), triggered by MLP | Hypothesis: best safety/utility trade-off |
+| CC-Delta (always-on SAE steering) | Assogba et al. 2026 — fixed mean-shift on jailbreak-shifted features | No conditional trigger; utility cost on all prompts |
+| **This method** | Data-driven conditional clamping triggered by MLP | Hypothesis: best safety/utility trade-off |
 
-### 7.4 Notebook Structure (Section 14)
+### 8.5 Notebook Structure (Section 14)
 
 | Cell | ID | Content | Status |
 |------|-----|---------|--------|
@@ -1495,19 +1740,21 @@ with model.trace(prompt_t):
 | 14.10 | **Retrain MLP on balanced features** | New MLP with F_H + F_S features; compare AUC vs old MLP | Done (index bug fixed, needs re-run) |
 | 14.11 | **Differential feature selection + MLP retraining** | Diff-only, EN baseline, EN+top-K combined; uses `original_idx` for correct column mapping | Done (index bug fixed, needs re-run) |
 | 14.12 | **Diagnostic: AUC gap** | 6 tests comparing traj_ds vs fmat; confirmed index bug was root cause | Done (index bug fixed, needs re-run) |
-| 14.13 | **Compute intervention targets** | Mean F_H activation during benign turns (score < 2) as suppression baseline | TODO |
-| 14.14 | **Implement intervention hook** | NNSight hook: when D_t > τ, suppress F_H toward benign baseline via SAE decoder | TODO |
-| 14.15 | **Run intervention evaluation** | Re-run attacks with hook active, judge-score per turn, measure ASR reduction | TODO |
-| 14.16 | **Utility evaluation** | XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts | TODO |
-| 14.17 | **Results & comparison** | Compare all baselines, plot score trajectory suppression | TODO |
+| 14.13 | **Compute intervention baselines** | Primary baseline: `y_hard==0` turns (scores 0–8, 1871 turns) — includes early turns from jailbroken trajs + all refused turns. Note: `y_hard` is per-turn (score>=9→1), not per-trajectory. `score<2` is a strict subset so combined pool = `y_hard==0`. Ablation: score<2-only, turn-1-only. Save all to `phase4_handoff.pt` | TODO |
+| **Section 15 — Phase 5 Intervention** | | | |
+| 15.0 | **Cleanup & load handoff** | Load `phase4_handoff.pt`, model, SAEs. Feature count and driver count are dynamic (read from handoff, not hardcoded). | TODO |
+| 15.1 | **Implement intervention hook** | NNSight hook: when D_t > τ, suppress causal drivers toward benign baseline via SAE decoder | TODO |
+| 15.2 | **Run intervention evaluation** | Re-run attacks with hook active, judge-score per turn, measure ASR reduction | TODO |
+| 15.3 | **Utility evaluation** | XSTest (BRR), MMLU, GSM8K, KL divergence on benign prompts | TODO |
+| 15.4 | **Results & comparison** | Compare all baselines, plot score trajectory suppression | TODO |
 
 **Output directory:** `results/intervention/`
 
 ---
 
-## 8. Evaluation Plan
+## 9. Evaluation Plan
 
-### 8.1 Safety Metrics
+### 9.1 Safety Metrics
 
 | Metric | Method | Target |
 |---|---|---|
@@ -1516,7 +1763,7 @@ with model.trace(prompt_t):
 | **Multi-turn ASR** | Crescendo attack set with per-turn judge scoring | Reduce compared to baseline |
 | **Score trajectory suppression** | Compare judge score curves (pre/post intervention) | Scores should plateau below 8 |
 
-### 8.2 Utility Metrics
+### 9.2 Utility Metrics
 
 | Metric | Dataset | Target |
 |---|---|---|
@@ -1525,7 +1772,7 @@ with model.trace(prompt_t):
 | **Math reasoning** | GSM8K | < 1% degradation |
 | **KL divergence from baseline** | WildChat benign subset | Near-zero on non-trigger prompts |
 
-### 8.3 Ablation Studies
+### 9.3 Ablation Studies
 
 1. **Single layer vs. cross-layer MLP:** Does using only F_H or only F_S (not both) match the cross-layer MLP?
 2. **EMA α sensitivity:** Does smoothing improve precision without hurting latency?
@@ -1551,7 +1798,7 @@ with model.trace(prompt_t):
 
 ---
 
-## 9. Implementation Roadmap
+## 10. Implementation Roadmap
 
 ### Immediate Next Steps — Dataset Generation (Prerequisite for all phases)
 
@@ -1750,7 +1997,7 @@ with model.trace(prompt_t):
 
 ---
 
-## 10. Key Design Decisions & Rationale
+## 11. Key Design Decisions & Rationale
 
 | Decision | Choice | Rationale |
 |---|---|---|
@@ -1770,12 +2017,37 @@ with model.trace(prompt_t):
 | Within-turn smoothing | SWiM (M=16 tokens) | CC++ ablation (Fig 5b) shows M=16 is optimal; converts sparse SAE spikes to continuous concept signals |
 | Across-turn smoothing | EMA (α=0.3) | Adapted from CC++ (α≈0.12 for tokens → α=0.3 for turns); provides ~3-turn memory appropriate for 5–10 turn conversations |
 | Training loss | Softmax-weighted BCE | CC++ insight: standard loss under-weights critical transition turns; softmax weighting focuses gradient on high-score turns where jailbreak occurs |
-| Activation extraction | On-the-fly recomputation (Phase 3+) | CC++ warns against I/O bottlenecks from pre-saved activations; on-the-fly enables augmentation and avoids 160GB+ disk footprint |
+| Activation extraction | On-the-fly recomputation (Phase 3+) | CC++ warns against I/O bottlenecks from pre-saved activations; on-the-fly enables augmentation and avoids large disk footprint |
 | Two-level smoothing | SWiM (token) + EMA (turn) | Novel extension of CC++ single-level approach; explicitly models both intra-turn patterns and inter-turn drift — CC++ does not address multi-turn |
+
+### 11.1 Key Data Structures
+
+#### `turn_meta` (from `feature_matrix_meta.json`)
+One dict per row of `X_full` (the 524K feature matrix). **Not** a full multi-turn transcript.
+
+| Field | Type | Notes |
+|---|---|---|
+| `traj_idx` | int | Which trajectory this turn belongs to |
+| `turn_idx` | int | **1-indexed** (starts at 1, not 0) |
+| `score` | int | 0–10 judge score for this turn |
+| `goal` | str | JBB goal text |
+
+**Important caveats:**
+- `turn_idx` is **1-indexed**. Use `turn_idx == 1` for first turns, not `== 0`.
+- **All turns from all trajectories are stored** — including early low-score turns from jailbroken trajectories (e.g., a traj with scores `[1,1,1,10]` stores all 4 turns).
+- `y_hard` is **per-turn, not per-trajectory**: `y_hard = 1` iff `score >= 9`, else `0`.
+  - `y_hard == 0` = 1,871 turns (scores 0–8) — includes early turns from jailbroken trajectories + all turns from refused trajectories.
+  - `y_hard == 1` = 264 turns (scores 9–10).
+- `score < 2` (1,598 turns) is a **strict subset** of `y_hard == 0` (1,871 turns), because `y_hard == 0` covers scores 0–8. Their union equals `y_hard == 0` — the "combined" pool adds nothing new.
+- **Why combined == y_hard==0:** Since `y_hard` thresholds at score >= 9, every score < 2 turn already has `y_hard == 0`. The 273 extra turns in `y_hard == 0` but not in `score < 2` are mid-range turns (scores 2–8) from both jailbroken and refused trajectories.
+
+#### `X_full` (from `feature_matrix.npz`)
+- Shape: `(n_turns, 524288)` — one row per turn in `turn_meta`
+- Also contains `y_hard` (binary) and `y_soft` (score/10) arrays
 
 ---
 
-## 11. Research Memos & Findings
+## 12. Research Memos & Findings
 
 ### Memo 1: Local Attacker Model Selection (V-0.8, 2026-02-25)
 

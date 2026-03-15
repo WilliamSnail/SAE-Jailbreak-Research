@@ -160,6 +160,16 @@ z_per_head[:, head_idx] = replacement                    # patch specific head
 7. **`.save()` on containers (remote)**: When using remote, save the list/dict itself, not individual tensor proxies within it. The ARENA solution docs may be outdated on this.
 8. **`t.sum()` on list of proxies**: Use `sum([v for v in list])` (Python builtin) instead of `t.sum()` which doesn't accept lists.
 9. **Test whitelist on NDIF**: Some test functions aren't whitelisted for remote execution. If a test fails on remote, try `REMOTE=False`.
+10. **Dict iteration order ≠ layer order**: When building a dict of per-layer corrections (e.g., `corrections[layer] += ...`) by iterating over a list of features/drivers, the dict's insertion order depends on which layer's feature appears first — NOT on layer number. If layer 29's driver is processed before layer 9's, iterating `for layer in corrections:` accesses layer 29 first → `OutOfOrderError`. **Fix:** Always use `for layer in sorted(corrections.keys()):` when applying interventions inside a trace/generate context.
+   ```python
+   # WRONG: dict insertion order may not match forward-pass order
+   for layer, corr in corrections.items():
+       model.layers[layer].output[0][:, -1] += corr
+
+   # RIGHT: sort by layer number → guaranteed forward-pass order
+   for layer in sorted(corrections.keys()):
+       model.layers[layer].output[0][:, -1] += corrections[layer]
+   ```
 
 ---
 
