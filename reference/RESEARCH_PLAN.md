@@ -1540,26 +1540,188 @@ Each NNSight `model.trace()` / `model.generate()` allocates KV caches and interm
 
 **Fix:** Add `gc.collect()` + `torch.cuda.empty_cache()` after every round. This frees temporary computation artifacts (KV caches, proxy graphs, intermediate SAE tensors) while keeping the model weights loaded.
 
-#### 7.2.2 Residual Stream Injection via SAE Decoder
+#### 7.2.2 Intervention Pipeline (Design A Implementation)
 
-When triggered, decode the feature-level correction through the SAE decoder to get a residual stream correction:
+The full per-turn pipeline uses two NNSight traces: one read-only for detection, one with hooks for generation (only when intervention is triggered).
 
-```python
-with model.trace(prompt_t):
-    h = model.model.layers[INTERVENTION_LAYER].output[0]
+```
+Turn t: attacker sends prompt -> target must respond
 
-    # Compute per-feature correction deltas
-    for i in intervention_features:
-        delta_i = target_values[i] - current_activation[i]
-        # Add-only (F_S) or subtract-only (F_H) constraint
-        if should_apply(delta_i, feature_type[i]):
-            correction += delta_i * sae.W_dec[sae_idx[i]]
-
-    h[:, :, :] += correction
+        +---------------------------------------------+
+        |  TRACE 1: Detection (read-only)             |
+        |                                             |
+        |  1. Tokenize full conversation [msg1..msgN] |
+        |  2. NNSight model.trace() -> extract hidden |
+        |     states at layers [9, 17, 22, 29]        |
+        |  3. SAE encode -> sparse activations        |
+        |  4. SWiM (sliding window mean, M=16,        |
+        |     max-pool) -> 1 vector per layer         |
+        |  5. Index 435 selected features             |
+        |  6. Compute delta features:                 |
+        |     current_SWiM - prev_turn_SWiM           |
+        |  7. MLP(435 features) -> D_t (0-1)          |
+        +----------------------+-----------------------+
+                               |
+                          D_t > tau?
+                         /          \
+                       NO            YES
+                       |              |
+        +--------------+--+    +------+---------------------+
+        | Plain generate  |    | Compute correction vectors |
+        | (no hooks)      |    |                            |
+        |                 |    | For each causal driver:    |
+        |                 |    |   if current > baseline:   |
+        |                 |    |     delta = baseline - cur |
+        |                 |    |     correction[layer] +=   |
+        |                 |    |       delta * W_dec[idx]   |
+        |                 |    |                            |
+        |                 |    | TRACE 2: Generate w/ hooks |
+        |                 |    |   layers in forward order  |
+        |                 |    |   h[:, -1] += correction   |
+        +--------+--------+    +------+---------------------+
+                 |                    |
+                 +--------+-----------+
+                          v
+                    response text
 ```
 
-**Add-only semantics for F_S:** Only inject if `current < target` (feature is suppressed below refusal level).
-**Subtract-only semantics for F_H:** Only inject if `current > baseline` (feature is elevated above benign level).
+**Key concepts:**
+
+- **D_t** — MLP detector score (0-1). High = jailbreak features detected in the input context.
+- **tau** — detection threshold (default 0.4). Below this, no intervention (benign conversation).
+- **Causal drivers** — the F_H features Phase 4 identified as causally driving jailbreak behavior.
+- **W_dec[sae_idx]** — the SAE decoder column for that feature. This is the direction in residual stream space that *represents* that feature.
+- **Subtract-only semantics** — only suppress features **elevated above benign baseline**. `delta = (baseline - current)` is negative, pushing activation *down* toward baseline. Never boost features above baseline.
+- **Alpha (α = 1.0)** — correction strength multiplier (tunable).
+- **Last token only** — `h[:, -1] += correction` applies at the last token position, where the model attends when generating the first output token.
+
+#### 7.2.3 SAE-Based Intervention: Detailed Mechanism
+
+##### 7.2.3.1 SAE Features and the Decoder
+
+The SAE (Sparse Autoencoder) decomposes a layer's residual stream into ~65K sparse features. Each feature represents a learned concept — some correlate with harmful content, others with refusal, safety, etc.
+
+```
+residual stream h (2048-dim)  -->  SAE encode  -->  sparse activations (65K-dim, mostly zeros)
+```
+
+The SAE also has a decoder `W_dec` of shape `(65K, 2048)`. Each row `W_dec[i]` is the direction in residual stream space that feature `i` represents. This is the bridge between interpretable feature space and the model's actual computation space.
+
+##### 7.2.3.2 Causal Drivers (from Phase 4)
+
+Phase 4 used gradient attribution on the MLP detector to find which of the 435 selected features most strongly push D_t toward 1 (jailbreak). These are the causal drivers, stored in `handoff["intervention_targets"]["causal_driver_global_indices"]`.
+
+Each `global_idx` encodes both the layer and the SAE feature index:
+
+```python
+global_idx = 143297  # example
+
+layer_offset = global_idx // D_SAE      # which layer (0-3 raw, 4-7 delta)
+sae_idx      = global_idx % D_SAE       # which of the 65K features in that layer
+is_delta     = layer_offset >= len(LAYERS)  # raw feature or delta feature
+layer        = LAYERS[layer_offset % 4]  # actual layer: 9, 17, 22, or 29
+```
+
+##### 7.2.3.3 Benign Baseline
+
+`handoff["benign_baselines"]["mean_activation_per_driver"]` stores the average activation of each causal driver across benign (non-jailbreak) conversations. This is the "normal" level — the target we suppress toward.
+
+##### 7.2.3.4 Subtract-Only Correction (Feature Space)
+
+For each causal driver, compare current activation vs benign baseline:
+
+```python
+current = current_features_by_layer[layer][sae_idx].item()  # this turn's SWiM value
+baseline = benign_baselines[i]                                # normal benign level
+
+if current > baseline:                    # ELEVATED = jailbreak signal present
+    delta = (baseline - current) * alpha  # always NEGATIVE (pushes down)
+```
+
+Concrete example:
+
+```
+Feature "deceptive_intent" at layer 22, sae_idx 4817:
+
+  Jailbreak turn:    current = 3.2, baseline = 0.5
+                     delta = (0.5 - 3.2) * 1.0 = -2.7   --> SUPPRESS by 2.7
+
+  Benign turn:       current = 0.3, baseline = 0.5
+                     current < baseline --> SKIP (never suppress below normal)
+```
+
+The subtract-only constraint ensures we only remove jailbreak signal, never artificially suppress features that are already at or below normal levels.
+
+##### 7.2.3.5 Feature-to-Residual-Stream Conversion (SAE Decoder)
+
+`delta` is a scalar in feature space. The model operates in residual stream space (2048-dim). The SAE decoder column converts between them:
+
+```
+Feature space:           delta = -2.7 (scalar, one feature)
+                            |
+                            v
+                    delta * W_dec[sae_idx]
+                            |
+                            v
+Residual stream space:   correction (2048-dim vector)
+                         "move residual stream in the direction
+                          that REDUCES this feature by 2.7"
+```
+
+In code:
+
+```python
+corrections[layer] += delta * saes_dict[layer].W_dec[sae_idx].to(device)
+#                     ^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#                     -2.7    (2048-dim) direction this feature
+#                             represents in residual stream
+```
+
+Multiple drivers at the same layer are summed into one correction vector:
+
+```
+Driver A (layer 22): delta_A * W_dec[idx_A] = [0.1, -0.3, 0.2, ...]  (2048-dim)
+Driver B (layer 22): delta_B * W_dec[idx_B] = [-0.2, 0.1, -0.4, ...]  (2048-dim)
+                                         sum = [-0.1, -0.2, -0.2, ...]  (2048-dim)
+                                                  ^
+                                          corrections[22] = this combined vector
+```
+
+##### 7.2.3.6 Injection into Model (Last Token)
+
+The correction is injected at the last token position during generation:
+
+```python
+with model.generate(...) as generator:
+    with generator.invoke(prompt):
+        for layer in sorted(corrections.keys()):    # forward-pass order (Gotcha #10)
+            model.model.language_model.layers[layer].output[0][:, -1] += corrections[layer]
+            #                                                  ^^^^^^
+            #                                            last token position
+```
+
+Why last token? In autoregressive generation, the model attends to all previous positions to predict the **next** token. The last position's residual stream is where the model concentrates its "decision" about what to generate. By shifting it here, we steer the model's output before it starts generating.
+
+##### 7.2.3.7 Summary
+
+**We find which SAE features are abnormally elevated compared to benign conversations, then subtract their decoder directions from the residual stream to push the model's internal state back toward "normal" before it starts generating.**
+
+```
+                   SAE feature space              Residual stream space
+                   (interpretable)                (model computation)
+
+  Benign turn:     feature = 0.5  ------>  h = [normal residual stream]
+                        |
+  Jailbreak turn:  feature = 3.2  ------>  h = [shifted toward harmful output]
+                        |
+  After correction: feature ~ 0.5 ------>  h = [shifted back toward normal]
+                        ^                        ^
+                        |                        |
+                  delta = -2.7            h += delta * W_dec[idx]
+                  (suppress to baseline)  (subtract decoder direction)
+```
+
+**Safety net:** If NNSight generate fails during intervention (state corruption after many calls), the system retries up to 2 times with `gc.collect()` + `empty_cache()`. If all retries fail, it falls back to plain generation without intervention and records `was_intervened=False` in the trajectory.
 
 #### 8.1.1 Phase 4→5 Handoff: Aggregation & Data Flow
 
