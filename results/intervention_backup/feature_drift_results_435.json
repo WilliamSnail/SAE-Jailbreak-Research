@@ -1,0 +1,62 @@
+{
+  "n_features": 435,
+  "theta": 0.1,
+  "modes": {
+    "jb_only": {
+      "n_fh": 309,
+      "n_fs": 3,
+      "mean": 0.14443313116752116,
+      "std": 0.0693251264304459
+    },
+    "differential": {
+      "n_fh": 294,
+      "n_fs": 2,
+      "mean": 0.1280522135098235,
+      "std": 0.06476751902654718
+    },
+    "jb_specific": {
+      "n_fh": 307,
+      "n_fs": 3,
+      "mean": 0.14371702326079952,
+      "std": 0.06999682395784082
+    }
+  },
+  "sweep": [
+    {
+      "threshold": 0.05,
+      "n_fh": 396,
+      "n_fs": 5,
+      "n_neutral": 34
+    },
+    {
+      "threshold": 0.1,
+      "n_fh": 294,
+      "n_fs": 2,
+      "n_neutral": 139
+    },
+    {
+      "threshold": 0.15,
+      "n_fh": 155,
+      "n_fs": 0,
+      "n_neutral": 280
+    },
+    {
+      "threshold": 0.2,
+      "n_fh": 64,
+      "n_fs": 0,
+      "n_neutral": 371
+    },
+    {
+      "threshold": 0.25,
+      "n_fh": 9,
+      "n_fs": 0,
+      "n_neutral": 426
+    },
+    {
+      "threshold": 0.3,
+      "n_fh": 0,
+      "n_fs": 0,
+      "n_neutral": 435
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "en_baseline_auc": 0.9416195856873822,
+  "strategies": {
+    "jb_specific": {
+      "mean_auc": 0.6205483561315095,
+      "std_auc": 0.020952619197373037,
+      "best_auc": 0.6495860331173506,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.6111411087113031,
+          "epochs": 13
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.6495860331173506,
+          "epochs": 35
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.6009179265658747,
+          "epochs": 14
+        }
+      ],
+      "n_features": 400,
+      "n_fh": 200,
+      "n_fs": 200
+    },
+    "differential": {
+      "mean_auc": 0.6928785697144227,
+      "std_auc": 0.01104310387511625,
+      "best_auc": 0.7076673866090712,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.6898308135349172,
+          "epochs": 33
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7076673866090712,
+          "epochs": 25
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.68113750899928,
+          "epochs": 35
+        }
+      ],
+      "n_features": 400,
+      "n_fh": 200,
+      "n_fs": 200
+    }
+  }
+}
