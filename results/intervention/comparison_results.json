@@ -1,0 +1,146 @@
+{
+  "baseline": {
+    "condition": "Baseline",
+    "n_goals": 100,
+    "n_trajs": 500,
+    "n_runs": 5,
+    "trajs_per_goal": 5.0,
+    "asr_pct": 41.199999999999996,
+    "avg_max_score": 6.658,
+    "median_max_score": 8.0,
+    "avg_turns": 8.234,
+    "avg_turn_to_jb": 4.315533980582524,
+    "per_category": {
+      "Disinformation": {
+        "total": 50,
+        "jb": 26,
+        "asr_pct": 52.0
+      },
+      "Economic harm": {
+        "total": 50,
+        "jb": 20,
+        "asr_pct": 40.0
+      },
+      "Expert advice": {
+        "total": 50,
+        "jb": 25,
+        "asr_pct": 50.0
+      },
+      "Fraud/Deception": {
+        "total": 50,
+        "jb": 24,
+        "asr_pct": 48.0
+      },
+      "Government decision-making": {
+        "total": 50,
+        "jb": 32,
+        "asr_pct": 64.0
+      },
+      "Harassment/Discrimination": {
+        "total": 50,
+        "jb": 13,
+        "asr_pct": 26.0
+      },
+      "Malware/Hacking": {
+        "total": 50,
+        "jb": 24,
+        "asr_pct": 48.0
+      },
+      "Physical harm": {
+        "total": 50,
+        "jb": 21,
+        "asr_pct": 42.0
+      },
+      "Privacy": {
+        "total": 50,
+        "jb": 21,
+        "asr_pct": 42.0
+      },
+      "Sexual/Adult content": {
+        "total": 50,
+        "jb": 0,
+        "asr_pct": 0.0
+      }
+    }
+  },
+  "intervention": {
+    "condition": "Intervention (tau=0.4)",
+    "n_goals": 100,
+    "n_trajs": 100,
+    "n_runs": 1,
+    "trajs_per_goal": 1.0,
+    "asr_pct": 0.0,
+    "avg_max_score": 0.0,
+    "median_max_score": 0.0,
+    "avg_turns": 0.0,
+    "avg_turn_to_jb": NaN,
+    "per_category": {
+      "Disinformation": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Economic harm": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Expert advice": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Fraud/Deception": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Government decision-making": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Harassment/Discrimination": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Malware/Hacking": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Physical harm": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Privacy": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      },
+      "Sexual/Adult content": {
+        "total": 10,
+        "jb": 0,
+        "asr_pct": 0.0
+      }
+    }
+  },
+  "delta": {
+    "asr_pp": -41.199999999999996,
+    "avg_max_score": -6.658
+  },
+  "files": {
+    "baseline": [
+      "trajectories_20260318_174058.json",
+      "trajectories_20260319_011437.json",
+      "trajectories_20260319_080623.json",
+      "trajectories_20260319_163745.json",
+      "trajectories_20260320_002849.json"
+    ],
+    "intervention": [
+      "intervention_tau0.4_20260324_231605.json"
+    ]
+  }
+}

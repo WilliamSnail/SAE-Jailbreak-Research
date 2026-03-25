@@ -1,0 +1,19 @@
+{
+  "n_total_features": 524288,
+  "active_filter": "none",
+  "filter_k": 10000,
+  "filter_sizes": {
+    "none": 417202,
+    "phase2_anova": 9994,
+    "temporal_variance": 10000,
+    "monotonicity": 10000,
+    "class_conditional": 10000
+  },
+  "theta": 0.1,
+  "theta_flat": 0.2,
+  "jb_specific": {
+    "n_valid": 417019,
+    "n_fh": 16579,
+    "n_fs": 17331
+  }
+}

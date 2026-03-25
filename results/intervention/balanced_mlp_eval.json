@@ -1,0 +1,55 @@
+{
+  "en_baseline_auc": 0.923654513888889,
+  "strategies": {
+    "jb_specific": {
+      "mean_auc": 0.8264507552610985,
+      "std_auc": 0.012696141471942266,
+      "best_auc": 0.8433329045122696,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8127150805647574,
+          "epochs": 36
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8433329045122696,
+          "epochs": 41
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8233042807062683,
+          "epochs": 44
+        }
+      ],
+      "n_features": 400,
+      "n_fh": 200,
+      "n_fs": 200
+    },
+    "differential": {
+      "mean_auc": 0.810608497089377,
+      "std_auc": 0.02300824165831417,
+      "best_auc": 0.8420223201363651,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7875566847843567,
+          "epochs": 25
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8022464863474094,
+          "epochs": 33
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8420223201363651,
+          "epochs": 31
+        }
+      ],
+      "n_features": 400,
+      "n_fh": 200,
+      "n_fs": 200
+    }
+  }
+}

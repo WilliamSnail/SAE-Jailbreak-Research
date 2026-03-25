@@ -1,0 +1,844 @@
+{
+  "active_filter": "none",
+  "filter_k": 10000,
+  "en_baseline_auc": 0.923654513888889,
+  "experiments": [
+    {
+      "name": "EN+100 [monotonicity]",
+      "n_features": 559,
+      "mean_auc": 0.9479813248426763,
+      "std_auc": 0.004880920777734585,
+      "best_auc": 0.9530601743157624,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9530601743157624,
+          "epochs": 30
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9413935612517287,
+          "epochs": 22
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.9494902389605377,
+          "epochs": 20
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "monotonicity",
+      "strategy": "augmented"
+    },
+    {
+      "name": "EN435 + top-200 drift = 659",
+      "n_features": 659,
+      "mean_auc": 0.946199037296712,
+      "std_auc": 0.0005382195506410318,
+      "best_auc": 0.9465796159907375,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9465796159907375,
+          "epochs": 32
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9454378799086611,
+          "epochs": 28
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.9465796159907375,
+          "epochs": 33
+        }
+      ],
+      "group": "augmented",
+      "K": 200
+    },
+    {
+      "name": "EN435 + top-50 drift = 509",
+      "n_features": 509,
+      "mean_auc": 0.9453521156959229,
+      "std_auc": 0.006688192140071473,
+      "best_auc": 0.9540169813141222,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9377351815521178,
+          "epochs": 28
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.944304184221529,
+          "epochs": 24
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.9540169813141222,
+          "epochs": 31
+        }
+      ],
+      "group": "augmented",
+      "K": 50
+    },
+    {
+      "name": "EN+100 [class_conditional]",
+      "n_features": 559,
+      "mean_auc": 0.9420019511358398,
+      "std_auc": 0.004218244547754579,
+      "best_auc": 0.9459042228154247,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9361431833531664,
+          "epochs": 19
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9439584472389284,
+          "epochs": 22
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.9459042228154247,
+          "epochs": 27
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "class_conditional",
+      "strategy": "augmented"
+    },
+    {
+      "name": "EN+100 [phase2_anova]",
+      "n_features": 559,
+      "mean_auc": 0.9396059134424682,
+      "std_auc": 0.008752267718296914,
+      "best_auc": 0.9469012317885055,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9469012317885055,
+          "epochs": 32
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9272987489145468,
+          "epochs": 23
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.9446177596243528,
+          "epochs": 27
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "phase2_anova",
+      "strategy": "augmented"
+    },
+    {
+      "name": "EN435 + top-100 drift = 559",
+      "n_features": 559,
+      "mean_auc": 0.9382202853804179,
+      "std_auc": 0.010559293537036584,
+      "best_auc": 0.9469173125783938,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9469173125783938,
+          "epochs": 23
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9233589553918888,
+          "epochs": 23
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.944384588170971,
+          "epochs": 26
+        }
+      ],
+      "group": "augmented",
+      "K": 100
+    },
+    {
+      "name": "EN+100 [none]",
+      "n_features": 559,
+      "mean_auc": 0.9382202853804179,
+      "std_auc": 0.010559293537036584,
+      "best_auc": 0.9469173125783938,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9469173125783938,
+          "epochs": 23
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9233589553918888,
+          "epochs": 23
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.944384588170971,
+          "epochs": 26
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "none",
+      "strategy": "augmented"
+    },
+    {
+      "name": "EN435 + top-400 drift = 859",
+      "n_features": 859,
+      "mean_auc": 0.9298984766131712,
+      "std_auc": 0.010965277739912009,
+      "best_auc": 0.9420769948219856,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9321229858810665,
+          "epochs": 35
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9420769948219856,
+          "epochs": 27
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.9154954491364615,
+          "epochs": 31
+        }
+      ],
+      "group": "augmented",
+      "K": 400
+    },
+    {
+      "name": "EN filtered |corr|>0.05 = 241",
+      "n_features": 241,
+      "mean_auc": 0.9235197632907729,
+      "std_auc": 0.0031453740016643204,
+      "best_auc": 0.927958061299971,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9215579069243881,
+          "epochs": 22
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9210433216479594,
+          "epochs": 30
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.927958061299971,
+          "epochs": 38
+        }
+      ],
+      "group": "filtered_en",
+      "theta": 0.05
+    },
+    {
+      "name": "EN+100 [temporal_variance]",
+      "n_features": 559,
+      "mean_auc": 0.9170552857556363,
+      "std_auc": 0.004530180470878809,
+      "best_auc": 0.9231338243334513,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.9157688225645644,
+          "epochs": 31
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.9122632103688934,
+          "epochs": 21
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.9231338243334513,
+          "epochs": 31
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "temporal_variance",
+      "strategy": "augmented"
+    },
+    {
+      "name": "EN filtered |corr|>0.1 = 102",
+      "n_features": 102,
+      "mean_auc": 0.8891175934561906,
+      "std_auc": 0.004994206531453659,
+      "best_auc": 0.895458784935516,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8832534654102209,
+          "epochs": 16
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.895458784935516,
+          "epochs": 30
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8886405300228347,
+          "epochs": 22
+        }
+      ],
+      "group": "filtered_en",
+      "theta": 0.1
+    },
+    {
+      "name": "Unbal-200 [phase2_anova] (143H+57S)",
+      "n_features": 200,
+      "mean_auc": 0.8492372345329603,
+      "std_auc": 0.011062409524829099,
+      "best_auc": 0.8618016916990963,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8348824494259158,
+          "epochs": 36
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8510275624738688,
+          "epochs": 35
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8618016916990963,
+          "epochs": 37
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "phase2_anova",
+      "strategy": "unbalanced"
+    },
+    {
+      "name": "Unbal-200 [temporal_variance] (100H+100S)",
+      "n_features": 200,
+      "mean_auc": 0.8340489284833671,
+      "std_auc": 0.0030202098996327115,
+      "best_auc": 0.8383156980670889,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.831746695397678,
+          "epochs": 35
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8383156980670889,
+          "epochs": 47
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8320843919853343,
+          "epochs": 46
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "temporal_variance",
+      "strategy": "unbalanced"
+    },
+    {
+      "name": "Bal-100H+100S [temporal_variance]",
+      "n_features": 200,
+      "mean_auc": 0.8340489284833671,
+      "std_auc": 0.0030202098996327115,
+      "best_auc": 0.8383156980670889,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.831746695397678,
+          "epochs": 35
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8383156980670889,
+          "epochs": 47
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8320843919853343,
+          "epochs": 46
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "temporal_variance",
+      "strategy": "balanced"
+    },
+    {
+      "name": "EN filtered |corr|>0.15 = 33",
+      "n_features": 33,
+      "mean_auc": 0.8281660395158611,
+      "std_auc": 0.0041072980343276905,
+      "best_auc": 0.833644228604509,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8237545428231434,
+          "epochs": 22
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8270993471199306,
+          "epochs": 24
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.833644228604509,
+          "epochs": 29
+        }
+      ],
+      "group": "filtered_en",
+      "theta": 0.15
+    },
+    {
+      "name": "Bal-100H+100S [phase2_anova]",
+      "n_features": 200,
+      "mean_auc": 0.8261532606481631,
+      "std_auc": 0.017864279130391608,
+      "best_auc": 0.8475782330428071,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.827035023960377,
+          "epochs": 35
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8475782330428071,
+          "epochs": 40
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8038465249413052,
+          "epochs": 16
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "phase2_anova",
+      "strategy": "balanced"
+    },
+    {
+      "name": "Bal 400H+400S=800",
+      "n_features": 800,
+      "mean_auc": 0.8239609129600446,
+      "std_auc": 0.027418756178797188,
+      "best_auc": 0.8514376226160228,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.786527514231499,
+          "epochs": 20
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8514376226160228,
+          "epochs": 26
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8339176020326119,
+          "epochs": 24
+        }
+      ],
+      "group": "balanced",
+      "N": 800,
+      "n_fh": 400,
+      "n_fs": 400
+    },
+    {
+      "name": "Unbal top-400 (133H+267S)",
+      "n_features": 400,
+      "mean_auc": 0.8170568938346251,
+      "std_auc": 0.0023730564262221883,
+      "best_auc": 0.8196459010066574,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8139130994114431,
+          "epochs": 20
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8196459010066574,
+          "epochs": 38
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.817611681085775,
+          "epochs": 28
+        }
+      ],
+      "group": "unbalanced",
+      "N": 400,
+      "n_fh": 133,
+      "n_fs": 267
+    },
+    {
+      "name": "Unbal top-800 (267H+533S)",
+      "n_features": 800,
+      "mean_auc": 0.8137201299327823,
+      "std_auc": 0.0026688621223931665,
+      "best_auc": 0.8159875213070465,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8099733058887852,
+          "epochs": 35
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8159875213070465,
+          "epochs": 23
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.815199562602515,
+          "epochs": 36
+        }
+      ],
+      "group": "unbalanced",
+      "N": 800,
+      "n_fh": 267,
+      "n_fs": 533
+    },
+    {
+      "name": "Bal 200H+200S=400",
+      "n_features": 400,
+      "mean_auc": 0.810608497089377,
+      "std_auc": 0.02300824165831417,
+      "best_auc": 0.8420223201363651,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7875566847843567,
+          "epochs": 25
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.8022464863474094,
+          "epochs": 33
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.8420223201363651,
+          "epochs": 31
+        }
+      ],
+      "group": "balanced",
+      "N": 400,
+      "n_fh": 200,
+      "n_fs": 200
+    },
+    {
+      "name": "Unbal top-200 (63H+137S)",
+      "n_features": 200,
+      "mean_auc": 0.79760181820131,
+      "std_auc": 0.00676239545327718,
+      "best_auc": 0.8070707233139292,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8070707233139292,
+          "epochs": 46
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7940292027144373,
+          "epochs": 47
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7917055285755636,
+          "epochs": 28
+        }
+      ],
+      "group": "unbalanced",
+      "N": 200,
+      "n_fh": 63,
+      "n_fs": 137
+    },
+    {
+      "name": "Unbal-200 [none] (63H+137S)",
+      "n_features": 200,
+      "mean_auc": 0.79760181820131,
+      "std_auc": 0.00676239545327718,
+      "best_auc": 0.8070707233139292,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.8070707233139292,
+          "epochs": 46
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7940292027144373,
+          "epochs": 47
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7917055285755636,
+          "epochs": 28
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "none",
+      "strategy": "unbalanced"
+    },
+    {
+      "name": "Bal 100H+100S=200",
+      "n_features": 200,
+      "mean_auc": 0.7823331082022748,
+      "std_auc": 0.015111811011264773,
+      "best_auc": 0.7959347763162127,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7898079953687325,
+          "epochs": 36
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7612565529218794,
+          "epochs": 24
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7959347763162127,
+          "epochs": 15
+        }
+      ],
+      "group": "balanced",
+      "N": 200,
+      "n_fh": 100,
+      "n_fs": 100
+    },
+    {
+      "name": "Bal-100H+100S [none]",
+      "n_features": 200,
+      "mean_auc": 0.7823331082022748,
+      "std_auc": 0.015111811011264773,
+      "best_auc": 0.7959347763162127,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7898079953687325,
+          "epochs": 36
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7612565529218794,
+          "epochs": 24
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7959347763162127,
+          "epochs": 15
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "none",
+      "strategy": "balanced"
+    },
+    {
+      "name": "Unbal top-100 (31H+69S)",
+      "n_features": 100,
+      "mean_auc": 0.7769272826681247,
+      "std_auc": 0.0066974511127305195,
+      "best_auc": 0.7816871964750909,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7816871964750909,
+          "epochs": 50
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7674556974238574,
+          "epochs": 30
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7816389541054256,
+          "epochs": 42
+        }
+      ],
+      "group": "unbalanced",
+      "N": 100,
+      "n_fh": 31,
+      "n_fs": 69
+    },
+    {
+      "name": "Bal-100H+100S [monotonicity]",
+      "n_features": 200,
+      "mean_auc": 0.7729204858542652,
+      "std_auc": 0.010624398161133102,
+      "best_auc": 0.7879426237416782,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7879426237416782,
+          "epochs": 20
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7656707297462451,
+          "epochs": 14
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7651481040748722,
+          "epochs": 26
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "monotonicity",
+      "strategy": "balanced"
+    },
+    {
+      "name": "Bal 50H+50S=100",
+      "n_features": 100,
+      "mean_auc": 0.767600424532853,
+      "std_auc": 0.0063582800634603125,
+      "best_auc": 0.7736146399511143,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7736146399511143,
+          "epochs": 26
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7588042324638986,
+          "epochs": 26
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7703824011835462,
+          "epochs": 36
+        }
+      ],
+      "group": "balanced",
+      "N": 100,
+      "n_fh": 50,
+      "n_fs": 50
+    },
+    {
+      "name": "Bal-100H+100S [class_conditional]",
+      "n_features": 200,
+      "mean_auc": 0.7642556202360661,
+      "std_auc": 0.015145611518078615,
+      "best_auc": 0.7769272826681247,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7769272826681247,
+          "epochs": 26
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7429646544238253,
+          "epochs": 22
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.772874923616248,
+          "epochs": 23
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "class_conditional",
+      "strategy": "balanced"
+    },
+    {
+      "name": "Unbal-200 [monotonicity] (61H+139S)",
+      "n_features": 200,
+      "mean_auc": 0.7459449608164753,
+      "std_auc": 0.010981826264394014,
+      "best_auc": 0.7588042324638987,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7588042324638987,
+          "epochs": 23
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7319734345351044,
+          "epochs": 18
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7470572154504229,
+          "epochs": 19
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "monotonicity",
+      "strategy": "unbalanced"
+    },
+    {
+      "name": "Unbal-200 [class_conditional] (48H+152S)",
+      "n_features": 200,
+      "mean_auc": 0.7269133459835547,
+      "std_auc": 0.012664167978089592,
+      "best_auc": 0.7401665969832438,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7307191329238092,
+          "epochs": 18
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.709854308043611,
+          "epochs": 22
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7401665969832438,
+          "epochs": 23
+        }
+      ],
+      "group": "filter_compare",
+      "filter_mode": "class_conditional",
+      "strategy": "unbalanced"
+    },
+    {
+      "name": "EN filtered |corr|>0.2 = 6",
+      "n_features": 6,
+      "mean_auc": 0.7226546167947769,
+      "std_auc": 0.009299260468923726,
+      "best_auc": 0.7307834560833627,
+      "seed_results": [
+        {
+          "seed": 42,
+          "best_auc": 0.7307834560833627,
+          "epochs": 40
+        },
+        {
+          "seed": 123,
+          "best_auc": 0.7275431769208504,
+          "epochs": 50
+        },
+        {
+          "seed": 456,
+          "best_auc": 0.7096372173801176,
+          "epochs": 21
+        }
+      ],
+      "group": "filtered_en",
+      "theta": 0.2
+    }
+  ]
+}

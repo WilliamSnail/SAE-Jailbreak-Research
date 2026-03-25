@@ -1,0 +1,42 @@
+{
+  "A. Full model (baseline)": {
+    "auc": 0.923654513888889,
+    "n_active": 459,
+    "mean_pred": 0.34287116570389214
+  },
+  "B. Data-driven F_H only": {
+    "auc": 0.7611328125000001,
+    "n_active": 144,
+    "mean_pred": 0.321304427207884
+  },
+  "C. Data-driven F_S only": {
+    "auc": 0.5130425347222222,
+    "n_active": 5,
+    "mean_pred": 0.37263206770454627
+  },
+  "D. Neutral removed": {
+    "auc": 0.7507378472222221,
+    "n_active": 149,
+    "mean_pred": 0.3149171183920569
+  },
+  "E. Causal drivers only": {
+    "auc": 0.7842230902777779,
+    "n_active": 122,
+    "mean_pred": 0.2968046446713272
+  },
+  "F. Old layer-based F_H only": {
+    "auc": 0.819552951388889,
+    "n_active": 215,
+    "mean_pred": 0.2681978331014946
+  },
+  "G. Old layer-based F_S only": {
+    "auc": 0.815603298611111,
+    "n_active": 244,
+    "mean_pred": 0.6787715455616153
+  },
+  "H. Strict F_H only (theta=0.20)": {
+    "auc": 0.5120008680555556,
+    "n_active": 16,
+    "mean_pred": 0.3587453339410865
+  }
+}

@@ -981,7 +981,7 @@ Zero-out ablation experiments on all 2,135 turns (1,023 jailbroken, 1,112 refuse
 
 **The near-absence of F_S in the 435-feature set was an Elastic Net artifact.**
 
-Ran Pearson correlation on the full pre-Elastic-Net feature matrix (524,288 features from `feature_matrix.npz`, 2,135 × 524,288). Computation took 1.1s (vectorized CPU).
+Ran Pearson correlation on the full pre-Elastic-Net feature matrix (524,288 features from `feature_matrix.dat`, 2,135 × 524,288). Computation took 1.1s (vectorized CPU).
 
 **Full d_sae results at θ = 0.10:**
 
@@ -1023,7 +1023,7 @@ Late layers (22, 29) have **more F_S than F_H** — the original layer-based heu
 
 **Method:**
 - Selected top-200 features by positive correlation (F_H) + top-200 by negative correlation (F_S) = 400 features
-- Used `feature_matrix.npz` directly (no GPU re-extraction needed)
+- Used `feature_matrix.dat` directly (no GPU re-extraction needed)
 - Trained new MLP (400 → 64 → 32 → 1) with same architecture and training procedure as Phase 3
 - 3 seeds, standard BCE, early stopping with patience=10
 
@@ -1566,6 +1566,21 @@ Each NNSight `model.trace()` / `model.generate()` allocates KV caches and interm
 
 **Fix:** Add `gc.collect()` + `torch.cuda.empty_cache()` after every round. This frees temporary computation artifacts (KV caches, proxy graphs, intermediate SAE tensors) while keeping the model weights loaded.
 
+#### 7.2.1.4 NNSight Implementation Gotcha: Pymount State Corruption in Long Runs
+
+NNSight uses an internal `Globals.stack` counter and `pymount` hooks (`"save"`, `"stop"`) to manage tracing contexts. Each `.trace()` / `.generate()` increments the counter on enter and decrements on exit. When exceptions occur inside a tracing context (CUDA OOM, JSON parse errors, SAE encoding failures), the `__exit__` cleanup may not fully unmount hooks, leaving stale state. Over hundreds of calls (e.g., 100 test cases x 10 turns x 2 NNSight calls per turn = 2000+ context entries/exits), these small leaks accumulate until `unmount("save")` fails with `KeyError: 'save'`.
+
+**Current fix (v1.6):** Periodic state reset every 10 test cases in the multi-run loop:
+```python
+from nnsight.intervention.tracing.globals import Globals
+Globals.stack = 0
+Globals.saves.clear()
+Globals.cache.cache.clear()
+```
+This is called between test cases when no NNSight context is active. The no-intervention generation path already uses direct HuggingFace `.generate()` (via `_plain_target_generate()`) to reduce NNSight call volume.
+
+**Permanent alternative (Option 2 -- not yet implemented):** Replace `model.trace()` in `extract_sae_activations_for_turn()` with a direct forward pass using PyTorch `register_forward_hook()`. This would eliminate NNSight from the feature extraction path entirely, leaving it only for the intervention generation path (which fires only when D_t > tau). This reduces NNSight calls by ~90% and uses stable PyTorch API for the high-frequency operation.
+
 #### 7.2.2 Intervention Pipeline (Design A Implementation)
 
 The full per-turn pipeline uses two NNSight traces: one read-only for detection, one with hooks for generation (only when intervention is triggered).
@@ -1923,7 +1938,7 @@ The refusal direction is a **blunt on/off switch** for refusal behavior. Our met
 | 14.5 | **Feature drift analysis** | Per-feature Pearson correlation, early-vs-late delta, reclassify 435 features | Done |
 | 14.6 | **Threshold sweep + MLP gradient attribution** | Sweep θ ∈ [0.05, 0.30]; ∂D_t/∂input for high-D_t turns; cross-reference drift × importance | Done |
 | 14.7 | **Feature group ablation** | 8 zero-out experiments; data-driven vs layer-based comparison | Done |
-| 14.8 | **Full d_sae drift analysis** | Pearson correlation on all 524,288 features from `feature_matrix.npz`; proves F_S exists but was filtered by Elastic Net | Done (index bug fixed) |
+| 14.8 | **Full d_sae drift analysis** | Pearson correlation on all 524,288 features from `feature_matrix.dat`; proves F_S exists but was filtered by Elastic Net | Done (index bug fixed) |
 | 14.9 | **Balanced feature re-selection** | Select top-200 F_H + top-200 F_S from full d_sae by |corr|; create new balanced feature set | Done (index bug fixed, needs re-run) |
 | 14.10 | **Retrain MLP on balanced features** | New MLP with F_H + F_S features; compare AUC vs old MLP | Done (index bug fixed, needs re-run) |
 | 14.11 | **Differential feature selection + MLP retraining** | Diff-only, EN baseline, EN+top-K combined; uses `original_idx` for correct column mapping | Done (index bug fixed, needs re-run) |
@@ -2013,6 +2028,7 @@ The refusal direction is a **blunt on/off switch** for refusal behavior. Our met
 ### Phase 2 — Elastic Net Feature Discovery with Δ-Features
 
 - [x] Build per-turn feature matrix: SWiM-aggregated vectors across 4 layers → `z_t` (262144-dim)
+  - **Refactored (2026-03-24):** Cell 12.5 now writes rows directly to a memory-mapped float16 file (`feature_matrix.dat`) instead of accumulating in RAM. Eliminates MemoryError at 5+ runs (~8 GB float32 → ~4 GB float16 on disk, ~0 MB peak RAM). Labels saved separately as `y_soft.npy`, `y_hard.npy`.
 - [x] Compute Δ-features: `Δz_t = z_t - z_{t-1}` for turn-to-turn change
 - [x] Concatenate `x_t = [z_t, Δz_t]` (524288-dim) with per-turn judge score labels
 - [x] Two-stage filtering: firing rate >5% + SelectKBest ANOVA F-test (K=10000) → 10,000 features
@@ -2049,6 +2065,7 @@ The refusal direction is a **blunt on/off switch** for refusal behavior. Our met
     ```
     **Note:** Input EMA (α=0.3) was removed from the default pipeline based on ablation 13.10.3 results — SWiM-only (AUC 0.974) outperforms Two-level with EMA (AUC 0.915).
 - [x] Implement trajectory-level dataset builder — cell 13.5: processes all trajectories, train/val split (80/20 stratified by trajectory-level hard label), saves to `results/mlp_detector/trajectory_dataset.pt`
+  - **Refactored (2026-03-24):** Cell 13.5 now reads from the Phase 2 memmap (`feature_matrix.dat`) instead of re-running GPU inference. Indexes 435 columns via `original_indices` from `feature_sets.json`, groups rows by `traj_idx` from `turn_meta`. Reduces dataset building from hours (GPU) to seconds (disk read). Same output structure — downstream training/eval unchanged.
   - **Stratified split details:** Split at trajectory level (not turn level) to prevent data leakage. Hard label (`1 if max(scores) > 8 else 0`) used only for `sklearn.train_test_split(stratify=...)` to ensure both splits preserve the jailbroken/refused ratio. Soft labels (`score_t / 10`) remain the actual training targets — hard labels never enter the loss function.
 - [x] Implement softmax-weighted BCE loss — cell 13.7: `SoftmaxWeightedBCE` class, weights turns by `exp(score)` so critical transition turns dominate gradient
 - [x] Implement DecouplingMLP — cell 13.6: 435 → 64 → 32 → 1, ReLU + Dropout(0.2), sigmoid output
@@ -2229,9 +2246,12 @@ One dict per row of `X_full` (the 524K feature matrix). **Not** a full multi-tur
 - `score < 2` (1,598 turns) is a **strict subset** of `y_hard == 0` (1,871 turns), because `y_hard == 0` covers scores 0–8. Their union equals `y_hard == 0` — the "combined" pool adds nothing new.
 - **Why combined == y_hard==0:** Since `y_hard` thresholds at score >= 9, every score < 2 turn already has `y_hard == 0`. The 273 extra turns in `y_hard == 0` but not in `score < 2` are mid-range turns (scores 2–8) from both jailbroken and refused trajectories.
 
-#### `X_full` (from `feature_matrix.npz`)
+#### `X_full` (from `feature_matrix.dat` — memmap, float16)
 - Shape: `(n_turns, 524288)` — one row per turn in `turn_meta`
-- Also contains `y_hard` (binary) and `y_soft` (score/10) arrays
+- Format: `np.memmap("feature_matrix.dat", dtype=float16, mode="r", shape=(n_samples, n_features))`
+- Labels stored separately: `y_hard.npy` (binary) and `y_soft.npy` (score/10)
+- Metadata in `feature_matrix_meta.json` includes `dtype`, `n_samples`, `n_features`
+- **Old format** (`feature_matrix.dat`, float32) is no longer produced as of 2026-03-24
 
 ---
 
