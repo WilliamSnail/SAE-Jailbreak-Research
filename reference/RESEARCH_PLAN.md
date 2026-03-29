@@ -1568,18 +1568,55 @@ Each NNSight `model.trace()` / `model.generate()` allocates KV caches and interm
 
 #### 7.2.1.4 NNSight Implementation Gotcha: Pymount State Corruption in Long Runs
 
-NNSight uses an internal `Globals.stack` counter and `pymount` hooks (`"save"`, `"stop"`) to manage tracing contexts. Each `.trace()` / `.generate()` increments the counter on enter and decrements on exit. When exceptions occur inside a tracing context (CUDA OOM, JSON parse errors, SAE encoding failures), the `__exit__` cleanup may not fully unmount hooks, leaving stale state. Over hundreds of calls (e.g., 100 test cases x 10 turns x 2 NNSight calls per turn = 2000+ context entries/exits), these small leaks accumulate until `unmount("save")` fails with `KeyError: 'save'`.
+**What NNSight does internally:**
 
-**Current fix (v1.6):** Periodic state reset every 10 test cases in the multi-run loop:
-```python
-from nnsight.intervention.tracing.globals import Globals
-Globals.stack = 0
-Globals.saves.clear()
-Globals.cache.cache.clear()
+NNSight uses a C extension called `pymount` to temporarily patch Python methods (`Object.save`, `Object.stop`) while a tracing context is active. The lifecycle is managed by a singleton `Globals` class (in `nnsight/intervention/tracing/globals.py`):
+
 ```
-This is called between test cases when no NNSight context is active. The no-intervention generation path already uses direct HuggingFace `.generate()` (via `_plain_target_generate()`) to reduce NNSight call volume.
+Globals.enter()                        Globals.exit()
+  if stack == 0:                         stack -= 1        ← happens first
+      mount("save")   ← patch method     if stack == 0:
+      mount("stop")                          unmount("save")  ← can throw!
+  stack += 1                                 unmount("stop")  ← skipped if above throws
+```
 
-**Permanent alternative (Option 2 -- not yet implemented):** Replace `model.trace()` in `extract_sae_activations_for_turn()` with a direct forward pass using PyTorch `register_forward_hook()`. This would eliminate NNSight from the feature extraction path entirely, leaving it only for the intervention generation path (which fires only when D_t > tau). This reduces NNSight calls by ~90% and uses stable PyTorch API for the high-frequency operation.
+Every `model.trace()` and `model.generate()` context calls `enter()` on entry and `exit()` on exit (via `ExecutionBackend.__call__` in `nnsight/intervention/backends/execution.py`).
+
+**How corruption happens:**
+
+1. During a trace/generate, an exception occurs (CUDA OOM, SAE encoding error, etc.)
+2. The `finally` block calls `Globals.exit()`, which decrements `stack` to 0
+3. `exit()` then calls `unmount("save")` — but if the hook is already gone (e.g., a prior partial cleanup), this throws `KeyError: 'save'`
+4. Because `unmount("save")` threw, `unmount("stop")` **never runs** — "stop" is left mounted
+5. On the **next** `Globals.enter()`: `stack == 0`, so it calls `mount("stop")` again → **double-mount** → `SystemError`
+
+Over a long run (100 test cases × 10 turns × 2 NNSight calls/turn = 2000+ enter/exit cycles), even rare exceptions accumulate corrupted state until the crash.
+
+**Symptom:** `KeyError: 'save'` during `unmount("save")` in `Globals.exit()`, or `SystemError` / `ExitTracingException` during `model.generate()`.
+
+**Current fix (v1.6):** `reset_nnsight_state()` forces a clean slate:
+```python
+def reset_nnsight_state():
+    # Try each unmount independently — one failing must not block the other.
+    # Also try unconditionally: stack may be 0 but hooks still mounted
+    # from a failed Globals.exit().
+    try: unmount("save")
+    except: pass
+    try: unmount("stop")
+    except: pass
+    Globals.stack = 0
+    Globals.saves.clear()
+    # Globals.cache (AST parse cache) is NOT cleared — not a corruption
+    # source, and re-parsing on every trace is wasteful.
+```
+
+Called in two places:
+- **(a) Between every test case** in the multi-run loop (Cell 102) — no NNSight context is active here, so it's safe.
+- **(b) Inside the retry loop** of `target_generate_with_intervention()` (Cell 101) — so retries start from clean pymount state instead of retrying with the same corruption.
+
+The no-intervention generation path already bypasses NNSight entirely (via `_plain_target_generate()` using direct HuggingFace `.generate()`), which reduces NNSight call volume.
+
+**Permanent alternative (Option 2 — not yet implemented):** Replace `model.trace()` in `extract_sae_activations_for_turn()` with a direct forward pass using PyTorch `register_forward_hook()`. This would eliminate NNSight from the feature extraction path entirely, leaving it only for the intervention generation path (which fires only when D_t > τ). This reduces NNSight calls by ~90% and uses stable PyTorch API for the high-frequency operation.
 
 #### 7.2.2 Intervention Pipeline (Design A Implementation)
 
@@ -1667,9 +1704,25 @@ layer        = LAYERS[layer_offset % 4]  # actual layer: 9, 17, 22, or 29
 
 `handoff["benign_baselines"]["mean_activation_per_driver"]` stores the average activation of each causal driver across benign (non-jailbreak) conversations. This is the "normal" level — the target we suppress toward.
 
-##### 7.2.3.4 Subtract-Only Correction (Feature Space)
+##### 7.2.3.4 Delta Drivers Are Skipped for Steering (v1.6 fix)
 
-For each causal driver, compare current activation vs benign baseline:
+Phase 4 selects causal drivers from all 459 features (raw + delta) based on gradient attribution. However, **delta drivers have no valid steering direction** and are skipped at intervention time. Of the 122 causal drivers, 52 are raw and 70 are delta.
+
+**Why delta drivers can't be steered:**
+
+1. **Baseline mismatch.** `benign_baselines[i]` for a delta driver is the mean of *delta values* across benign turns (~0). But `compute_intervention_correction()` reads `current_features_by_layer[layer][sae_idx]`, which is the *raw SWiM activation* (e.g. 50.0). Comparing raw vs delta baseline always finds a huge gap, causing aggressive over-suppression on every turn.
+
+2. **No meaningful decoder direction.** A delta feature represents "how much did this SAE feature change since last turn" -- it's a temporal difference, not an activation level. `W_dec[sae_idx]` is the decoder direction for the *raw* feature, not for its change over time. Suppressing a delta via `W_dec` actually suppresses the raw feature by the wrong amount.
+
+3. **Redundancy.** If a delta feature is elevated (feature spiked this turn), the underlying raw feature is likely elevated too. If that raw feature matters for jailbreaking, it's already among the 52 raw drivers or detected by the MLP through other correlated features.
+
+**Implementation:** `if is_delta: continue` in `compute_intervention_correction()`.
+
+**Future option:** If 52 raw drivers prove insufficient, delta drivers could be converted to raw driver corrections by using raw benign baselines instead of delta baselines. This would require recomputing baselines from the Phase 2 feature matrix.
+
+##### 7.2.3.5 Subtract-Only Correction (Feature Space)
+
+For each raw causal driver, compare current activation vs benign baseline:
 
 ```python
 current = current_features_by_layer[layer][sae_idx].item()  # this turn's SWiM value
@@ -1693,7 +1746,7 @@ Feature "deceptive_intent" at layer 22, sae_idx 4817:
 
 The subtract-only constraint ensures we only remove jailbreak signal, never artificially suppress features that are already at or below normal levels.
 
-##### 7.2.3.5 Feature-to-Residual-Stream Conversion (SAE Decoder)
+##### 7.2.3.6 Feature-to-Residual-Stream Conversion (SAE Decoder)
 
 `delta` is a scalar in feature space. The model operates in residual stream space (2048-dim). The SAE decoder column converts between them:
 
@@ -1728,7 +1781,7 @@ Driver B (layer 22): delta_B * W_dec[idx_B] = [-0.2, 0.1, -0.4, ...]  (2048-dim)
                                           corrections[22] = this combined vector
 ```
 
-##### 7.2.3.6 Injection into Model (Last Token)
+##### 7.2.3.7 Injection into Model (Last Token)
 
 The correction is injected at the last token position during generation:
 
@@ -1743,7 +1796,7 @@ with model.generate(...) as generator:
 
 Why last token? In autoregressive generation, the model attends to all previous positions to predict the **next** token. The last position's residual stream is where the model concentrates its "decision" about what to generate. By shifting it here, we steer the model's output before it starts generating.
 
-##### 7.2.3.7 Summary
+##### 7.2.3.8 Summary
 
 **We find which SAE features are abnormally elevated compared to benign conversations, then subtract their decoder directions from the residual stream to push the model's internal state back toward "normal" before it starts generating.**
 
