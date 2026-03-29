@@ -1704,47 +1704,102 @@ layer        = LAYERS[layer_offset % 4]  # actual layer: 9, 17, 22, or 29
 
 `handoff["benign_baselines"]["mean_activation_per_driver"]` stores the average activation of each causal driver across benign (non-jailbreak) conversations. This is the "normal" level — the target we suppress toward.
 
-##### 7.2.3.4 Delta Drivers Are Skipped for Steering (v1.6 fix)
+##### 7.2.3.4 Delta Driver Steering — Configurable Modes (v1.6)
 
-Phase 4 selects causal drivers from all 459 features (raw + delta) based on gradient attribution. However, **delta drivers have no valid steering direction** and are skipped at intervention time. Of the 122 causal drivers, 52 are raw and 70 are delta.
+Phase 4 selects 122 causal drivers from all 459 features (raw + delta) based on gradient attribution. Of these, **52 are raw** and **70 are delta**. Zero overlap (no SAE latent appears as both raw and delta driver).
 
-**Why delta drivers can't be steered:**
+**The core problem with naïve delta steering:**
 
-1. **Baseline mismatch.** `benign_baselines[i]` for a delta driver is the mean of *delta values* across benign turns (~0). But `compute_intervention_correction()` reads `current_features_by_layer[layer][sae_idx]`, which is the *raw SWiM activation* (e.g. 50.0). Comparing raw vs delta baseline always finds a huge gap, causing aggressive over-suppression on every turn.
+If we simply pass delta drivers through the same code path as raw drivers, `current_features_by_layer[layer][sae_idx]` gives the *raw SWiM activation* (e.g. 50.0) while `benign_baselines[i]` is the mean of *delta values* (~3.3). This apples-to-oranges comparison always finds a huge gap, causing aggressive over-suppression.
 
-2. **No meaningful decoder direction.** A delta feature represents "how much did this SAE feature change since last turn" -- it's a temporal difference, not an activation level. `W_dec[sae_idx]` is the decoder direction for the *raw* feature, not for its change over time. Suppressing a delta via `W_dec` actually suppresses the raw feature by the wrong amount.
+**Correct delta steering** requires computing the actual turn-to-turn delta:
+```
+actual_delta = swim_current[layer][sae_idx] - swim_previous[layer][sae_idx]
+```
+Then compare `actual_delta` against the delta baseline (which was correctly computed from `X_full` delta columns in Phase 4).
 
-3. **Redundancy.** If a delta feature is elevated (feature spiked this turn), the underlying raw feature is likely elevated too. If that raw feature matters for jailbreaking, it's already among the 52 raw drivers or detected by the MLP through other correlated features.
+**Configurable steering modes (3 knobs in Cell 100):**
 
-**Implementation:** `if is_delta: continue` in `compute_intervention_correction()`.
+| Config | Value | Description |
+|--------|-------|-------------|
+| `STEER_DELTA` | `True` / `False` | Include delta drivers in steering |
+| `STEER_TARGET` | `"baseline"` / `"zero"` | Push toward benign mean or toward 0 |
+| `INTERVENTION_ALPHA` | float | Correction strength multiplier |
 
-**Future option:** If 52 raw drivers prove insufficient, delta drivers could be converted to raw driver corrections by using raw benign baselines instead of delta baselines. This would require recomputing baselines from the Phase 2 feature matrix.
+**Ablation grid:**
+
+| Config | Delta? | Target | Alpha | Description |
+|--------|--------|--------|-------|-------------|
+| Original | No | baseline | 1.0 | Raw-only, return to benign mean |
+| A | Yes | baseline | 1.0 | Both raw+delta, return to mean |
+| B | Yes | zero | 1.0 | Both raw+delta, full suppression |
+| B-gentle | Yes | zero | 0.5 | Both, half suppression |
+
+**Benign baselines (from Phase 4):**
+- 52 raw baselines: mean ≈ 52.9, range [0.15, 593.5] — mean SWiM activation in benign turns
+- 70 delta baselines: mean ≈ 3.3, range [0.03, 24.9] — mean turn-to-turn change in benign turns
+- Baselines are computed correctly per-type from `X_full[benign_rows][:, driver_global_idx]`
+
+**Implementation details (`compute_intervention_correction()` in Cell 101):**
+
+```python
+if is_delta:
+    if not steer_delta:        # STEER_DELTA=False → skip (original behavior)
+        continue
+    if prev_swim is None:      # first turn → no prev to diff against
+        continue
+    current = swim_current[sae_idx] - swim_prev[sae_idx]  # actual delta
+else:
+    current = swim_current[sae_idx]                         # raw activation
+
+target = 0.0 if steer_target == "zero" else baselines[i]
+
+if current > target:
+    correction = (target - current) * alpha * W_dec[sae_idx]
+```
+
+**First-turn handling:** Delta drivers are always skipped on turn 1 (no previous SWiM to compute delta from). This matches the MLP detector which sets delta features to 0.0 on the first turn.
+
+**Expected correction magnitudes (baseline mode, attack turns):**
+- Raw drivers: `(52.9 - 60.8) × α ≈ -7.9` per driver (benign mean vs attack mean)
+- Delta drivers: `(3.3 - 7.4) × α ≈ -4.1` per driver (smaller, but 70 features)
+
+**W_dec direction is valid for both:** The SAE decoder direction `W_dec[sae_idx]` maps an SAE latent to residual stream space regardless of whether we're correcting for absolute level (raw) or excess change (delta). The direction is the same — only the magnitude differs.
 
 ##### 7.2.3.5 Subtract-Only Correction (Feature Space)
 
-For each raw causal driver, compare current activation vs benign baseline:
+For each causal driver, compare current value vs target:
 
 ```python
-current = current_features_by_layer[layer][sae_idx].item()  # this turn's SWiM value
-baseline = benign_baselines[i]                                # normal benign level
+# target depends on STEER_TARGET config:
+#   "baseline" → benign_baselines[i]  (return to normal level)
+#   "zero"     → 0.0                  (full suppression)
 
-if current > baseline:                    # ELEVATED = jailbreak signal present
-    delta = (baseline - current) * alpha  # always NEGATIVE (pushes down)
+if current > target:                         # ELEVATED = jailbreak signal present
+    correction = (target - current) * alpha  # always NEGATIVE (pushes down)
 ```
 
-Concrete example:
+Concrete example (STEER_TARGET="baseline"):
 
 ```
-Feature "deceptive_intent" at layer 22, sae_idx 4817:
+Raw feature "deceptive_intent" at layer 22, sae_idx 4817:
 
-  Jailbreak turn:    current = 3.2, baseline = 0.5
-                     delta = (0.5 - 3.2) * 1.0 = -2.7   --> SUPPRESS by 2.7
+  Jailbreak turn:    current = 3.2, target = 0.5 (baseline)
+                     correction = (0.5 - 3.2) * 1.0 = -2.7   --> SUPPRESS by 2.7
 
-  Benign turn:       current = 0.3, baseline = 0.5
-                     current < baseline --> SKIP (never suppress below normal)
+  Benign turn:       current = 0.3, target = 0.5
+                     current < target --> SKIP (never suppress below normal)
 ```
 
-The subtract-only constraint ensures we only remove jailbreak signal, never artificially suppress features that are already at or below normal levels.
+Concrete example (STEER_TARGET="zero"):
+
+```
+Same feature, same jailbreak turn:
+                     current = 3.2, target = 0.0
+                     correction = (0.0 - 3.2) * 1.0 = -3.2   --> SUPPRESS by 3.2 (stronger)
+```
+
+The subtract-only constraint (`if current > target`) ensures we only remove jailbreak signal, never artificially suppress features that are already at or below the target level.
 
 ##### 7.2.3.6 Feature-to-Residual-Stream Conversion (SAE Decoder)
 
@@ -1798,7 +1853,7 @@ Why last token? In autoregressive generation, the model attends to all previous 
 
 ##### 7.2.3.8 Summary
 
-**We find which SAE features are abnormally elevated compared to benign conversations, then subtract their decoder directions from the residual stream to push the model's internal state back toward "normal" before it starts generating.**
+**We find which SAE features (raw and/or delta) are abnormally elevated compared to a target level, then subtract their decoder directions from the residual stream to push the model's internal state back toward "normal" before it starts generating.**
 
 ```
                    SAE feature space              Residual stream space
@@ -1808,14 +1863,18 @@ Why last token? In autoregressive generation, the model attends to all previous 
                         |
   Jailbreak turn:  feature = 3.2  ------>  h = [shifted toward harmful output]
                         |
-  After correction: feature ~ 0.5 ------>  h = [shifted back toward normal]
-                        ^                        ^
-                        |                        |
-                  delta = -2.7            h += delta * W_dec[idx]
-                  (suppress to baseline)  (subtract decoder direction)
+  After correction: feature ~ target ----->  h = [shifted back toward normal]
+                        ^                         ^
+                        |                         |
+                  (target - 3.2) * α        h += correction * W_dec[idx]
+
+  target = baseline (0.5) → suppress to benign mean
+  target = zero (0.0)     → full suppression
 ```
 
-**Safety net:** If NNSight generate fails during intervention (state corruption after many calls), the system retries up to 2 times with `gc.collect()` + `empty_cache()`. If all retries fail, it falls back to plain generation without intervention and records `was_intervened=False` in the trajectory.
+**Steering coverage:** With `STEER_DELTA=True`, all 122 causal drivers (52 raw + 70 delta) contribute to the correction vector. With `STEER_DELTA=False` (original), only the 52 raw drivers steer.
+
+**Safety net:** If NNSight generate fails during intervention (state corruption after many calls), the system retries up to 2 times with `reset_nnsight_state()` + `gc.collect()` + `empty_cache()`. If all retries fail, it falls back to plain generation without intervention and records `was_intervened=False` in the trajectory.
 
 #### 8.1.1 Phase 4→5 Handoff: Aggregation & Data Flow
 
