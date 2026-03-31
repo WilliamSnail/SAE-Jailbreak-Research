@@ -41,29 +41,26 @@ This XOR-like failure mode cannot be captured by any linear probe. It requires a
 
 | Model | Use | d_model | Layers |
 |---|---|---|---|
-| `google/gemma-3-1b-it` | Primary research (fast iteration) | 1152 | 26 |
-| `google/gemma-3-4b-it` | Validation / scaling check | 2560 | 35 |
+| `google/gemma-3-4b-it` | **Primary** | 2560 | 35 |
+| `google/gemma-3-1b-it` | Deprecated (fast iteration during early dev) | 1152 | 26 |
 
-> **Note:** Research_Method.md originally specified Gemma-2-2B-IT, but active experiments have migrated to Gemma-3 IT variants (better performance + GemmaScope 2 SAE coverage). Final thesis model should be confirmed before writing.
+> **Updated 2026-03-29:** Primary model is now Gemma-3-4B-IT. 1B variant was used for early-stage iteration only and is no longer active.
 
 ### 2.2 Sparse Autoencoders
 
-**Release:** GemmaScope 2 JumpReLU SAEs (`gemma-scope-2-1b-it-res`, `gemma-scope-2-4b-it-res`)
+**Release:** GemmaScope 2 JumpReLU SAEs (`gemma-scope-2-4b-it-res`)
 
 **Width options:** 16k / 65k / 262k / 1M latents
 **Active config:** `width=65k`, `l0=medium` (good sparsity/coverage balance)
 
-**Layer assignment:**
+**Active layer set (4B model):** `[9, 17, 22, 29]`
 
-| Circuit | Layer Range (1B) | Layer Range (4B) | Semantic Role |
-|---|---|---|---|
-| F_H — Harm Recognition | Layers 7, 13 | Layers 9, 13 | Early/middle semantic processing |
-| F_S — Safety Erosion | Layers 17, 22 | Layers 22, 29 | Late behavioural execution |
+> F_H / F_S assignment is determined data-driven in Phase 4 (MLP gradient attribution), not by prior layer-role assumptions. The four layers are treated as undifferentiated inputs to the pipeline until Phase 4 reclassifies them.
 
 ### 2.3 Infrastructure
 
 - **Activation interception:** NNSight (local or NDIF remote via `REMOTE` flag)
-- **Safety judge:** LlamaGuard-3-8B (`meta-llama/Llama-Guard-3-8B`)
+- **Safety judge:** GPT-4o mini via OpenAI API
 - **Feature interpretation:** GPT-4o via OpenAI API
 - **Feature visualization:** Neuronpedia dashboards
 
@@ -104,8 +101,7 @@ Trajectory = {
 **Positive class (jailbroken):**
 - **Crescendo attacks** (primary): Gradual escalation attack over 5–10 turns using the Crescendo strategy (Microsoft Research). An attacker LLM starts with benign conversation and incrementally shifts toward the harmful goal, exploiting context-building and trust establishment across turns.
 - **Adaptive attacks:** The attacker LLM dynamically adjusts its strategy based on the target model's responses — if one approach is refused, it pivots to alternative framing (roleplay, hypothetical scenarios, academic framing).
-- **JailbreakBench/JBB-Behaviors** (`judge_comparison` config, `test` split): 300 pre-crafted single-turn jailbreak prompts. Used as **seed goals** for multi-turn trajectory generation.
-  - *Current result:* 31% jailbreak rate on Gemma-3-4B-IT (93/300 classified unsafe by LlamaGuard-3-8B)
+- **JBB-Behaviors** (`behaviors` subset, `harmful` split): 100 entries across 10 harmful categories. Each entry follows a three-level structure — **Category** (broad harm type, e.g., *Harassment/Discrimination*), **Behavior** (specific harmful action, e.g., *Body shaming*), and **Goal** (concrete instruction based on the behavior, used as the attack objective for one multi-turn trajectory generation run).
 
 **Negative class (refused / benign):**
 - **Failed attack trajectories:** Crescendo conversations where the model consistently refuses (max score ≤ 8). These are naturally produced by the same generation pipeline.
@@ -289,7 +285,7 @@ Crescendomation uses JSON test cases as attack seeds. JBB-Behaviors goals are co
 }
 ```
 
-We generate one test case JSON per JBB-Behaviors entry (300 total), then run each through the modified pipeline.
+We generate one test case JSON per JBB-Behaviors entry (100 total, `behaviors` subset, `harmful` split), then run each through the modified pipeline.
 
 ### 3.4 Dataset Splits & Targets
 
@@ -544,31 +540,19 @@ model.fit(X_scaled, y_hard)
 
 **Why `SGDClassifier`:** With 500k+ features after concatenation, `liblinear` solver is too slow. SGD scales linearly with feature count.
 
-**Cross-validation grid:**
-- `alpha` ∈ {1e-3, 1e-4, 1e-5} — controls total regularization strength
+**Cross-validation grid (final — stronger regularization):**
+- `alpha` ∈ {1.0, 0.1, 0.01} — controls total regularization strength
 - `l1_ratio` ∈ {0.5, 0.7, 0.9} — tradeoff between sparsity and stability
+- 5-fold Stratified K-Fold, scored by ROC-AUC
 
-**Target:** ~50–200 total non-zero features (sparse enough for interpretability, sufficient for the Phase 3 MLP).
+**Best parameters (V-1.6):** `alpha=0.01`, `l1_ratio=0.5`, CV ROC-AUC = 0.8534 ± 0.0250
 
-#### Experimental Results (V-1.0, First Run)
+**Final results:**
+- Total selected features: **459** (F_H: 215 [raw: 100, Δ: 115], F_S: 244 [raw: 109, Δ: 135])
+- Labels: hard labels (`y_hard`)
+- Δ-features dominate in both groups (supports state-transition thesis claim)
 
-Initial grid search on 2,135 turns (264 jailbroken, 1,871 safe) with 10,000 filtered features:
-
-| alpha | l1_ratio | CV ROC-AUC | Notes |
-|---|---|---|---|
-| 1e-3 | 0.5 | 0.7799 ± 0.0217 | |
-| 1e-3 | 0.7 | 0.7662 ± 0.0208 | |
-| 1e-3 | 0.9 | 0.7578 ± 0.0263 | |
-| 1e-4 | 0.5 | 0.7877 ± 0.0303 | |
-| **1e-4** | **0.7** | **0.7906 ± 0.0458** | **Best — but high variance and insufficient sparsity** |
-| 1e-4 | 0.9 | 0.7826 ± 0.0258 | |
-| 1e-5 | 0.5 | 0.7887 ± 0.0332 | |
-| 1e-5 | 0.7 | 0.7884 ± 0.0418 | |
-| 1e-5 | 0.9 | 0.7784 ± 0.0348 | |
-
-**Issue — insufficient sparsity:** Best model retains **9,213 / 10,000** non-zero coefficients. The alpha grid (1e-3 to 1e-5) is too weak for L1 to zero out features. The target is ~50–200 non-zero features. A second grid with stronger regularization (alpha ∈ {1.0, 0.1, 0.01}) is needed.
-
-**Issue — steering overhead with ~9k features:** Phase 4 (Conditional Sparse Clamping) computes `correction = Σ Δ_i × W_dec[i]` for each selected F_S feature. With 9,213 features, this requires 9,213 lookups into the SAE decoder matrix (d_sae × d_model = 65536 × 1152) and a summation. This is a matrix-vector product of size ~9k × 1152, which is computationally cheap on GPU (~microseconds). However, the interpretability goal suffers — 9,213 features cannot be manually verified via GPT-4o/Neuronpedia, and the "sparse" clamping becomes nearly dense. For both interpretability and principled intervention, the feature set must be reduced to ~50–200.
+> **Note:** An earlier weak-regularization grid (alpha ∈ {1e-3, 1e-4, 1e-5}) produced 9,213/10,000 non-zero coefficients — insufficient sparsity. The stronger grid above resolved this.
 
 ### 5.4 How Elastic Net Works (Mechanics)
 
@@ -2120,8 +2104,8 @@ The refusal direction is a **blunt on/off switch** for refusal behavior. Our met
 - [x] Fork/clone [AIM-Intelligence/Automated-Multi-Turn-Jailbreaks](https://github.com/AIM-Intelligence/Automated-Multi-Turn-Jailbreaks)
 - [x] Implement `target_generate_with_activations()` — replace OpenAI target client with NNSight-wrapped Gemma-3-IT that extracts SAE activations per turn
 - [x] Modify rubric generation prompt so scores are directly on our scale (1=refusal, 10=jailbreak) — no inversion needed
-- [x] Convert JBB-Behaviors 300 goals into Crescendomation test case JSONs (`to_json.py`)
-- [x] Run Crescendomation pipeline with modified target on all 300 goals (`max_rounds=8`)
+- [x] Convert JBB-Behaviors 100 goals (`behaviors` subset, `harmful` split) into Crescendomation test case JSONs (`to_json.py`)
+- [x] Run Crescendomation pipeline with modified target on all 100 goals (`max_rounds=8`)
 - [ ] Run additional tactics (Actor Attack, Opposite Day) on a subset for dataset diversity
 - [x] Save extended trajectories with per-turn `(score, activations, was_backtracked)` to `data/trajectories.json`
 - [x] Apply labeling: `max(normalized_score) > 8 → "jailbroken"`, else `"refused"`
