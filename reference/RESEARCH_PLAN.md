@@ -1925,6 +1925,46 @@ Input prompt → Model forward pass
                    SAE decoder → residual stream correction
 ```
 
+### 8.1.2 First Experiment Results & Root Cause Analysis (CRITICAL FINDING)
+
+**Experiment:** tau=0.4, alpha=1.0, STEER_DELTA=True, STEER_TARGET="baseline", all 122 causal drivers.
+- Baseline: 500 trajectories (5 runs × 100 goals)
+- Intervention: 600 trajectories (6 runs × 100 goals)
+
+**Result: ASR INCREASED from 41.2% → 53.2% (+12.0pp).** Intervention made jailbreaks worse.
+
+| Category | Baseline ASR | Intervention ASR | Delta |
+|----------|-------------|-----------------|-------|
+| Privacy | 42.0% | 75.0% | +33.0pp |
+| Malware/Hacking | 48.0% | 68.3% | +20.3pp |
+| Economic harm | 40.0% | 60.0% | +20.0pp |
+| Government | 64.0% | 78.3% | +14.3pp |
+| Expert advice | 50.0% | 61.7% | +11.7pp |
+| Disinformation | 52.0% | 61.7% | +9.7pp |
+| Fraud/Deception | 48.0% | 55.0% | +7.0pp |
+| Physical harm | 42.0% | 46.7% | +4.7pp |
+| Sexual/Adult | 0.0% | 3.3% | +3.3pp |
+| Harassment | 26.0% | 21.7% | -4.3pp |
+
+Intervention rate: 28.6% of turns. Avg overhead: 1.437s/turn (extraction dominates).
+
+**Root cause: sign-blind causal driver selection.**
+
+Cell 90 selects causal drivers as top-50% by `abs(corr_with_score)` AND top-50% by `abs(grad×input)`. The absolute value discards drift direction. Recomputation of per-driver drift from `trajectory_dataset.pt` shows:
+
+| Drift category | Count | What happens when suppressed |
+|----------------|-------|------------------------------|
+| F_H (drift > 0.1) | 83 | Correct: reduces escalation |
+| Neutral+ (0 < drift ≤ 0.1) | 33 | Probably harmless noise |
+| F_S (drift < -0.1) | 5 | **WRONG: weakens safety mechanisms** |
+| Neutral- (-0.1 < drift < 0) | 1 | **WRONG: weakens safety** |
+
+The 6 negative-drift drivers are safety-correlated features that are HIGH during safe behavior. Suppressing them toward baseline (lower) removes the model's defenses. Despite being only 6/122 features, their W_dec directions may strongly overlap with the model's refusal/safety circuits.
+
+Additionally, Cell 98 labels the strategy `"F_H_suppression_only"` but this is a hardcoded string — the code never filters by drift direction. The `corr_with_score` array from Cell 89 is not saved to disk; it's lost at the serialization boundary.
+
+**Fix (V-1.8):** Save per-driver drift correlation in handoff, add `STEER_MODE` config to filter drivers by drift direction. See §8.2.1.
+
 ### 8.2 Intervention Feature Set Ablation
 
 The current plan intervenes on 131 causal drivers (subset of 435 EN features). We should ablate whether expanding the intervention surface improves ASR reduction.
@@ -1943,6 +1983,21 @@ The current plan intervenes on 131 causal drivers (subset of 435 EN features). W
 4. Store multiple intervention target sets in `phase4_handoff.pt`
 
 **Key question:** Do the 100 extra drift features provide new intervention targets (high-drift features the EN missed), or are they redundant with the existing 131 causal drivers?
+
+### 8.2.1 Drift-Direction Ablation (Priority — Fix for §8.1.2)
+
+Before expanding the feature set (§8.2), fix the sign-blind driver selection. Implemented in V-1.8.
+
+| Mode | Config `STEER_MODE` | Drivers | What it tests |
+|------|---------------------|---------|---------------|
+| `"all"` | All 122 | 122 | Current behavior (control, already run in V-1.7) |
+| `"fh_only"` | drift > 0 | 116 | Drop the 6 negative-drift drivers |
+| `"strict_fh"` | drift > 0.1 | 83 | Only data-driven F_H (above theta) |
+| `"fh_suppress_fs_boost"` | suppress F_H + boost F_S toward baseline | 122 | Suppress bad + reinforce good |
+
+**Implementation:** `phase4_handoff.pt` now includes `driver_drift_corr` (per-driver differential Pearson r). `compute_intervention_correction()` filters drivers based on `STEER_MODE` before computing correction vectors.
+
+Quick probe: 1–2 runs per mode (100–200 trajectories). If `"fh_only"` or `"strict_fh"` reduces ASR below baseline, proceed with full 5-run evaluation.
 
 ### 8.3 Linear Probe vs MLP: Detection and Intervention
 

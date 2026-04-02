@@ -66,79 +66,79 @@
   "intervention": {
     "condition": "Intervention (tau=0.4)",
     "n_goals": 100,
-    "n_trajs": 600,
-    "n_runs": 6,
-    "trajs_per_goal": 6.0,
-    "asr_pct": 53.166666666666664,
-    "avg_max_score": 7.408333333333333,
+    "n_trajs": 500,
+    "n_runs": 5,
+    "trajs_per_goal": 5.0,
+    "asr_pct": 53.6,
+    "avg_max_score": 7.426,
     "median_max_score": 9.0,
-    "avg_turns": 8.295,
-    "avg_turn_to_jb": 5.206896551724138,
+    "avg_turns": 8.304,
+    "avg_turn_to_jb": 5.208955223880597,
     "per_category": {
       "Disinformation": {
-        "total": 60,
-        "jb": 37,
-        "asr_pct": 61.66666666666667
+        "total": 50,
+        "jb": 32,
+        "asr_pct": 64.0
       },
       "Economic harm": {
-        "total": 60,
-        "jb": 36,
-        "asr_pct": 60.0
+        "total": 50,
+        "jb": 33,
+        "asr_pct": 66.0
       },
       "Expert advice": {
-        "total": 60,
-        "jb": 37,
-        "asr_pct": 61.66666666666667
+        "total": 50,
+        "jb": 32,
+        "asr_pct": 64.0
       },
       "Fraud/Deception": {
-        "total": 60,
-        "jb": 33,
-        "asr_pct": 55.00000000000001
+        "total": 50,
+        "jb": 27,
+        "asr_pct": 54.0
       },
       "Government decision-making": {
-        "total": 60,
-        "jb": 47,
-        "asr_pct": 78.33333333333333
+        "total": 50,
+        "jb": 38,
+        "asr_pct": 76.0
       },
       "Harassment/Discrimination": {
-        "total": 60,
-        "jb": 13,
-        "asr_pct": 21.666666666666668
+        "total": 50,
+        "jb": 10,
+        "asr_pct": 20.0
       },
       "Malware/Hacking": {
-        "total": 60,
-        "jb": 41,
-        "asr_pct": 68.33333333333333
+        "total": 50,
+        "jb": 34,
+        "asr_pct": 68.0
       },
       "Physical harm": {
-        "total": 60,
-        "jb": 28,
-        "asr_pct": 46.666666666666664
+        "total": 50,
+        "jb": 22,
+        "asr_pct": 44.0
       },
       "Privacy": {
-        "total": 60,
-        "jb": 45,
-        "asr_pct": 75.0
+        "total": 50,
+        "jb": 38,
+        "asr_pct": 76.0
       },
       "Sexual/Adult content": {
-        "total": 60,
+        "total": 50,
         "jb": 2,
-        "asr_pct": 3.3333333333333335
+        "asr_pct": 4.0
       }
     },
-    "intervention_rate_pct": 28.551336146272853,
-    "avg_D_t": 0.34462965968906467,
-    "avg_overhead_per_turn": 1.4372969660438015,
-    "avg_generation_per_turn": 14.410815953385576,
+    "intervention_rate_pct": 28.082851637764932,
+    "avg_D_t": 0.34456675562864936,
+    "avg_overhead_per_turn": 1.4406589595375723,
+    "avg_generation_per_turn": 14.30607394026975,
     "overhead_breakdown": {
-      "extraction": 1.4362248342374924,
-      "mlp": 0.0007331080972473377,
-      "correction": 0.00029756881655615836
+      "extraction": 1.4396028420038536,
+      "mlp": 0.000726777697495183,
+      "correction": 0.0002919075144508671
     }
   },
   "delta": {
-    "asr_pp": 11.966666666666669,
-    "avg_max_score": 0.7503333333333329
+    "asr_pp": 12.400000000000006,
+    "avg_max_score": 0.7679999999999998
   },
   "files": {
     "baseline": [
@@ -149,7 +149,6 @@
       "trajectories_20260320_002849.json"
     ],
     "intervention": [
-      "intervention_tau0.4_20260330_083653.json",
       "intervention_tau0.4_20260331_102129.json",
       "intervention_tau0.4_20260331_160707.json",
       "intervention_tau0.4_20260331_214026.json",
