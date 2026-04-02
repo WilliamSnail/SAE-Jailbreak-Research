@@ -1997,6 +1997,23 @@ Before expanding the feature set (§8.2), fix the sign-blind driver selection. I
 
 **Implementation:** `phase4_handoff.pt` now includes `driver_drift_corr` (per-driver differential Pearson r). `compute_intervention_correction()` filters drivers based on `STEER_MODE` before computing correction vectors.
 
+**Parameter semantics:**
+
+- **`INTERVENTION_ALPHA` (α):** Scales the correction magnitude for all drivers.
+  - α = 1.0 → push feature activation exactly to target level.
+  - α > 1.0 → overshoot past target (more aggressive intervention).
+  - α < 1.0 → partial correction toward target.
+  - Effect on F_H (drift > 0): higher α **subtracts** more activation (stronger suppression of harmful features).
+  - Effect on F_S (drift < 0, `fh_suppress_fs_boost` mode only): higher α **adds** more activation (stronger boost of safety features).
+
+- **`STEER_TARGET`:**
+  - `"baseline"` → target = benign baseline activation for each feature.
+  - `"zero"` → target = 0. More aggressive than baseline since correction is measured from zero.
+
+- **`STEER_DELTA`:**
+  - `True` → correction = `(target - current) * α` — adaptive, scales with how far activation has drifted.
+  - `False` → correction = `target * α` — fixed nudge regardless of current activation.
+
 Quick probe: 1–2 runs per mode (100–200 trajectories). If `"fh_only"` or `"strict_fh"` reduces ASR below baseline, proceed with full 5-run evaluation.
 
 ### 8.3 Linear Probe vs MLP: Detection and Intervention
