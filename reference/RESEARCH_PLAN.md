@@ -2017,6 +2017,42 @@ Before expanding the feature set (§8.2), fix the sign-blind driver selection. I
 
 Quick probe: 1–2 runs per mode (100–200 trajectories). If `"fh_only"` or `"strict_fh"` reduces ASR below baseline, proceed with full 5-run evaluation.
 
+#### Diagnostic: Feature selection gaps and correction magnitude (V-1.8 analysis)
+
+**1. Missing features from conjunctive filter (Cell 90).**
+Cell 90 selects drivers using top-50% `|drift|` AND top-50% `|attribution|` (grad×input). Of the 459 elastic-net features:
+
+- 140 features have drift > 0.1 but are **not** in the 122 drivers (7 with drift > 0.2).
+- These were excluded by low MLP attribution — the MLP learned to rely on correlated features instead.
+- Attribution measures MLP sensitivity, not causal importance for jailbreak behavior. A feature can genuinely escalate during jailbreaks (high drift) yet have low attribution because other correlated features already capture the signal.
+- However, adding more features to steer would exacerbate the magnitude problem below.
+
+**2. Correction magnitude explosion — likely primary cause of +10–12pp ASR increase.**
+
+Per-layer driver density and baseline magnitudes:
+
+| Layer | Drivers (raw + delta) | Baseline sum | Max single baseline |
+|-------|----------------------|-------------|-------------------|
+| L9  | 37 (14 + 23) | 669  | 593.5 |
+| L17 | 41 (21 + 20) | 549  | 137.4 |
+| L22 | 29 (12 + 17) | 813  | 447.8 |
+| L29 | 15 (5 + 10)  | 950  | 482.0 |
+
+Three compounding issues:
+
+- **Non-orthogonal W_dec directions.** SAE decoder rows have significant overlap (typical cosine similarity 0.1–0.3). Correcting feature A's direction partially perturbs features B, C, D. With 37–41 corrections stacking at one layer, cross-talk accumulates.
+- **Baseline outliers.** Baselines range from 0.03 to 593.5 (mean=24.4, median=2.1). A single feature at L9 with baseline 593.5 can produce correction magnitude ~493× its W_dec direction, dominating the entire layer's correction. Other features contribute negligibly.
+- **Off-manifold push.** The residual stream normally lives on a low-dimensional manifold. A large compound correction vector pushes it into a region the model never saw during training, causing incoherent outputs or disrupting safety circuits — not making the model "more harmful" but breaking normal behavior in ways the judge scores as harmful.
+
+**Proposed mitigations (to implement and ablate):**
+
+| Mitigation | What it fixes | Priority |
+|------------|--------------|----------|
+| **Norm capping** — clamp `\|\|correction\|\|` per layer to fraction of typical `\|\|residual_stream\|\|` | Directly limits total perturbation, prevents off-manifold push | High — most principled first fix |
+| **Top-K per layer** — steer only top 3–5 highest-drift drivers per layer | Reduces cross-talk between W_dec directions | Medium |
+| **Lower alpha** (0.1–0.3) | Scales down everything proportionally | Low — simple but untargeted |
+| **Normalize by baseline** — use `(target-current)/baseline` instead of `(target-current)` | Prevents outlier features from dominating | Medium |
+
 ### 8.3 Linear Probe vs MLP: Detection and Intervention
 
 #### Why MLP over linear probe for detection
