@@ -1994,6 +1994,7 @@ Before expanding the feature set (§8.2), fix the sign-blind driver selection. I
 | `"fh_only"` | drift > 0 | 116 | Drop the 6 negative-drift drivers |
 | `"strict_fh"` | drift > 0.1 | 83 | Only data-driven F_H (above theta) |
 | `"fh_suppress_fs_boost"` | suppress F_H + boost F_S toward baseline | 122 | Suppress bad + reinforce good |
+| `"fs_boost_only"` | only boost F_S (drift < 0), skip all F_H | 6 | Isolate safety-feature reinforcement |
 
 **Implementation:** `phase4_handoff.pt` now includes `driver_drift_corr` (per-driver differential Pearson r). `compute_intervention_correction()` filters drivers based on `STEER_MODE` before computing correction vectors.
 
