@@ -3,7 +3,10 @@
     "allow": [
       "WebFetch(domain:arxiv.org)",
       "WebFetch(domain:ar5iv.labs.arxiv.org)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(jq '.cells | to_entries | .[] | select\\(.value.source[0] // \"\" | test\\(\"^## 1[234]\\\\\\\\.|^### 1[234]\\\\\\\\.|^#### 1[234]\\\\\\\\.\"\\)\\) | {cell_idx: .key, type: .value.cell_type, source: \\(.value.source | join\\(\"\"\\)\\), outputs: .value.outputs}')",
+      "Read(//tmp/**)",
+      "Bash(python -c ':*)"
     ]
   }
 }
