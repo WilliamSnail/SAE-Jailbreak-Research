@@ -1965,6 +1965,35 @@ Additionally, Cell 98 labels the strategy `"F_H_suppression_only"` but this is a
 
 **Fix (V-1.8):** Save per-driver drift correlation in handoff, add `STEER_MODE` config to filter drivers by drift direction. See §8.2.1.
 
+### 8.1.3 Drift-Ablation Results & Code-Path Discovery (V-1.8)
+
+Ran 5 intervention experiments varying `STEER_MODE` and `INTERVENTION_ALPHA`. All used tau=0.4, STEER_DELTA=False, STEER_TARGET="baseline", 2 runs × 100 goals vs baseline 5 runs × 100 goals.
+
+| Mode | Alpha | Drivers active | ASR (Baseline=41.2%) | Delta |
+|------|-------|---------------|---------------------|-------|
+| `all` | 1.0 | 122 | 53.2% | +12.0pp |
+| `fh_suppress_fs_boost` | 1.0 | 122 | 51.5% | +10.3pp |
+| `fs_boost_only` | 1.0 | 6 | 51.0% | +9.8pp |
+| `fs_boost_only` | 0.1 | 6 | 53.0% | +11.8pp |
+| **`all`** | **0.0** | **0 (zero correction)** | **54.5%** | **+13.3pp** |
+
+**Critical finding: alpha=0 (zero correction) produces the same or worse ASR increase as all other modes.**
+
+All modes produce ~+10–13pp regardless of which features are steered or correction strength. Zero correction is just as harmful as full correction. This rules out:
+- Sign-blind driver selection as root cause
+- Correction magnitude explosion as root cause
+- F_S suppression as root cause
+
+**The correction vectors are not the problem.** The issue is upstream of the steering math.
+
+**Two remaining hypotheses:**
+
+1. **Code path difference.** When intervention triggers (D_t > tau), `target_generate_with_intervention()` uses NNSight hooks for generation, while non-triggered turns use `_plain_target_generate()`. Even with empty corrections, the hooked path may produce subtly different outputs (floating-point divergence, different sampling behavior, or generation parameter differences).
+
+2. **Statistical confound / variance.** Baseline uses 5 runs (March 18–20), intervention always uses 2 runs (April dates). With only 2 runs per condition and 100 goals, per-goal ASR has high variance. Different random seeds and temporal separation could account for the gap.
+
+**Definitive test:** Run with `INTERVENTION_TAU = 999` (never triggers hooked path) through the Phase 5 pipeline for 2 runs. If ASR returns to ~41%, the hooked code path is the culprit. If ASR is still ~53%, the increase is due to variance or environmental confound, not the intervention system.
+
 ### 8.2 Intervention Feature Set Ablation
 
 The current plan intervenes on 131 causal drivers (subset of 435 EN features). We should ablate whether expanding the intervention surface improves ASR reduction.
