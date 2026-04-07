@@ -2,18 +2,20 @@
 lr_vs_mlp_comparison.py
 
 Compares Logistic Regression (linear) vs MLP (non-linear) on the same
-459 EN-selected features, same train/val split used in Phase 3.
+459 EN-selected features, same train/val split as Phase 3.
 
 Tests:
-  1. LR (hard labels, scaled features)
-  2. MLP retrained with hard labels  (matches thesis-reported AUC)
-  3. MLP retrained with soft labels  (label ablation)
-  4. Per-turn vs trajectory-level FPR at tau=0.4
+  1. LR  — hard labels, scaled features (Fix 1: StandardScaler + max_iter=5000)
+  2. MLP — soft labels  (matches Phase 3 best_model.pt exactly)
+  3. MLP — hard labels  (label ablation, matches cell 80 ablation config)
+  4. EWL sweep at tau in {0.3, 0.4, 0.5, 0.6} for both MLP variants
+  5. Per-turn vs trajectory-level FPR at tau=0.4
 
-AUC definition (same as Phase 3 / cell 91):
-  - Turn-level ROC-AUC
-  - Hard binary label: 1 if judge score > 8, else 0
-  - Val set only (100 held-out trajectories, 828 turns)
+Training loop matches Phase 3 cell 75 exactly:
+  - Per-trajectory (not batched): loss.backward() called once per trajectory
+  - Standard BCE (uniform turn weighting)
+  - Adam lr=1e-3, epochs=100, patience=10 on val loss
+  - Val AUC always evaluated with hard labels (score > 8), matching cell 75
 
 Usage:
   conda run -n sae python lr_vs_mlp_comparison.py
@@ -29,14 +31,15 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 
-# ── Config (match Phase 3) ────────────────────────────────────────────
+# ── Config (must match Phase 3) ───────────────────────────────────────
 MLP_HIDDEN  = [64, 32]
 MLP_DROPOUT = 0.2
 MLP_LR      = 1e-3
 MLP_EPOCHS  = 100
 PATIENCE    = 10
 SEED        = 42
-TAU         = 0.4
+TAU_SWEEP   = [0.3, 0.4, 0.5, 0.6]
+TAU_FPR     = 0.4   # threshold used for FPR breakdown
 
 PHASE3_DIR   = Path("C:\\Users\\Lab622_TV\\Documents\\GitHub\\SAE-Jailbreak-Research\\results\\mlp_detector")
 DATASET_PATH = PHASE3_DIR / "trajectory_dataset.pt"
@@ -44,7 +47,8 @@ DATASET_PATH = PHASE3_DIR / "trajectory_dataset.pt"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
-# ── MLP architecture (matches Phase 3) ───────────────────────────────
+
+# ── MLP architecture (matches Phase 3 cell 71) ───────────────────────
 class DecouplingMLP(nn.Module):
     def __init__(self, input_dim, hidden=MLP_HIDDEN, dropout=MLP_DROPOUT):
         super().__init__()
@@ -62,7 +66,7 @@ class DecouplingMLP(nn.Module):
 
 # ── Load dataset ──────────────────────────────────────────────────────
 print("\nLoading dataset...")
-saved        = torch.load(DATASET_PATH, weights_only=False, map_location="cpu")
+saved         = torch.load(DATASET_PATH, weights_only=False, map_location="cpu")
 train_dataset = saved["train"]
 val_dataset   = saved["val"]
 N_FEATURES    = saved["config"]["n_features"]
@@ -71,185 +75,358 @@ print(f"  Val:   {len(val_dataset)} trajectories")
 print(f"  Features: {N_FEATURES}")
 
 
-# ── Build flat turn arrays ────────────────────────────────────────────
-def build_arrays(dataset):
-    X_list, y_hard_list, y_soft_list = [], [], []
+# ── Build flat turn arrays (for LR and FPR) ───────────────────────────
+def build_flat_arrays(dataset):
+    """Returns X (n_turns, N_FEATURES), y_hard, y_soft as flat arrays."""
+    X_list, yh_list, ys_list = [], [], []
     for traj in dataset:
         for feat_vec, score in zip(traj["features"], traj["scores"]):
             X_list.append(np.asarray(feat_vec, dtype=np.float32))
-            y_hard_list.append(1 if score > 8 else 0)
-            y_soft_list.append(score / 10.0)
-    X      = np.stack(X_list)
-    y_hard = np.array(y_hard_list, dtype=np.float32)
-    y_soft = np.array(y_soft_list, dtype=np.float32)
-    return X, y_hard, y_soft
+            yh_list.append(1 if score > 8 else 0)
+            ys_list.append(score / 10.0)
+    return (np.stack(X_list),
+            np.array(yh_list, dtype=np.float32),
+            np.array(ys_list, dtype=np.float32))
 
 print("\nBuilding turn arrays...")
-X_train, y_train_hard, y_train_soft = build_arrays(train_dataset)
-X_val,   y_val_hard,   y_val_soft   = build_arrays(val_dataset)
+X_train, y_train_hard, y_train_soft = build_flat_arrays(train_dataset)
+X_val,   y_val_hard,   y_val_soft   = build_flat_arrays(val_dataset)
 print(f"  Train turns: {len(X_train)} ({int(y_train_hard.sum())} positive)")
 print(f"  Val turns:   {len(X_val)}   ({int(y_val_hard.sum())} positive)")
 
 
-# ── Fix 1: Logistic Regression with scaling ───────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# [1] Logistic Regression — hard labels, scaled (Fix 1)
+# ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("[1] Logistic Regression (hard labels, scaled features)")
+print("[1] Logistic Regression (hard labels, StandardScaler, max_iter=5000)")
 print("="*60)
-scaler        = StandardScaler()
-X_train_sc    = scaler.fit_transform(X_train)
-X_val_sc      = scaler.transform(X_val)
 
-lr = LogisticRegression(
+scaler     = StandardScaler()
+X_train_sc = scaler.fit_transform(X_train)
+X_val_sc   = scaler.transform(X_val)
+
+lr_clf = LogisticRegression(
     max_iter=5000,
     class_weight="balanced",
     solver="lbfgs",
     C=1.0,
     random_state=SEED,
 )
-lr.fit(X_train_sc, y_train_hard)
-lr_probs = lr.predict_proba(X_val_sc)[:, 1]
+lr_clf.fit(X_train_sc, y_train_hard)
+lr_probs = lr_clf.predict_proba(X_val_sc)[:, 1]
 lr_auc   = roc_auc_score(y_val_hard, lr_probs)
 print(f"  Val AUC: {lr_auc:.4f}")
 
 
-# ── Fix 2: Train MLP from scratch, track best val AUC ─────────────────
-def train_mlp(X_tr, y_tr, X_v, y_v, label_mode="hard", seed=SEED):
+# ─────────────────────────────────────────────────────────────────────
+# MLP training function — matches Phase 3 cell 75 exactly
+# ─────────────────────────────────────────────────────────────────────
+def train_mlp(train_data, val_data, label_mode="soft", seed=SEED):
     """
-    Train MLP and return (best_val_auc, val_probs_at_best_auc).
-    label_mode: 'hard' (1/0) or 'soft' (score/10).
-    AUC always evaluated with hard labels.
+    Train MLP per-trajectory, matching Phase 3 cell 75.
+
+    label_mode:
+      'soft' — training targets = score / 10.0  (Phase 3 default)
+      'hard' — training targets = 1 if score > 8 else 0  (ablation)
+
+    Val loss uses same label_mode as training.
+    Val AUC always uses hard labels (score > 8), matching Phase 3.
+
+    Returns:
+      best_val_auc   — highest val AUC seen during training
+      best_val_probs — val predictions at the epoch with best val AUC
+      loss_val_probs — val predictions at the epoch with best val loss
+                       (what best_model.pt would contain)
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     model = DecouplingMLP(input_dim=N_FEATURES).to(device)
-    opt   = optim.Adam(model.parameters(), lr=MLP_LR)
-
-    X_tr_t = torch.tensor(X_tr, dtype=torch.float32, device=device)
-    X_v_t  = torch.tensor(X_v,  dtype=torch.float32, device=device)
-    y_v_t  = torch.tensor(y_v,  dtype=torch.float32, device=device)  # hard labels for AUC
-
-    if label_mode == "hard":
-        y_tr_t = torch.tensor(y_tr, dtype=torch.float32, device=device)
-    else:
-        # soft: passed in as y_tr (already score/10)
-        y_tr_t = torch.tensor(y_tr, dtype=torch.float32, device=device)
+    optimizer = optim.Adam(model.parameters(), lr=MLP_LR)
 
     best_val_loss  = float("inf")
     best_val_auc   = 0.0
-    best_probs     = np.zeros(len(X_v), dtype=np.float32)
+    best_val_probs = np.zeros(sum(len(t["scores"]) for t in val_data), dtype=np.float32)
+    loss_val_probs = best_val_probs.copy()
     patience_count = 0
 
     for epoch in range(MLP_EPOCHS):
-        # ── Train ──
+        # ── Train: per-trajectory loop (matches cell 75) ──────────────
         model.train()
-        perm = torch.randperm(len(X_tr_t))
-        preds = model(X_tr_t[perm]).squeeze(-1)
-        loss  = F.binary_cross_entropy(preds, y_tr_t[perm])
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+        train_losses = []
+        perm = np.random.permutation(len(train_data))
 
-        # ── Validate ──
+        for idx in perm:
+            traj = train_data[idx]
+            features   = traj["features"]
+            scores_raw = traj["scores"]
+
+            if len(features) < 2:
+                continue
+
+            X_traj = torch.tensor(
+                np.stack(features), dtype=torch.float32, device=device
+            )  # (n_turns, N_FEATURES)
+
+            # Label type — matches Phase 3 soft labels or ablation hard labels
+            if label_mode == "soft":
+                targets = torch.tensor(
+                    [s / 10.0 for s in scores_raw],
+                    dtype=torch.float32, device=device
+                )
+            else:
+                targets = torch.tensor(
+                    [1.0 if s > 8 else 0.0 for s in scores_raw],
+                    dtype=torch.float32, device=device
+                )
+
+            preds = model(X_traj).squeeze(-1)
+            loss  = F.binary_cross_entropy(preds, targets)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_losses.append(loss.item())
+
+        # ── Validate ──────────────────────────────────────────────────
         model.eval()
+        val_losses   = []
+        all_preds    = []
+        all_hard_tgt = []   # always hard, for AUC (matches cell 75 `targets > 0.8`)
+
         with torch.no_grad():
-            val_preds = model(X_v_t).squeeze(-1)
-            val_loss  = F.binary_cross_entropy(val_preds, y_v_t).item()
-            val_probs = val_preds.cpu().numpy()
+            for traj in val_data:
+                features   = traj["features"]
+                scores_raw = traj["scores"]
 
-        val_auc = roc_auc_score(y_val_hard, val_probs)
+                if len(features) < 2:
+                    continue
 
+                X_traj = torch.tensor(
+                    np.stack(features), dtype=torch.float32, device=device
+                )
+
+                # Val loss uses same label type as training
+                if label_mode == "soft":
+                    val_targets = torch.tensor(
+                        [s / 10.0 for s in scores_raw],
+                        dtype=torch.float32, device=device
+                    )
+                else:
+                    val_targets = torch.tensor(
+                        [1.0 if s > 8 else 0.0 for s in scores_raw],
+                        dtype=torch.float32, device=device
+                    )
+
+                preds = model(X_traj).squeeze(-1)
+                loss  = F.binary_cross_entropy(preds, val_targets)
+                val_losses.append(loss.item())
+
+                all_preds.extend(preds.cpu().numpy())
+                # Hard labels for AUC — matches Phase 3: (targets > 0.8).int()
+                all_hard_tgt.extend([1 if s > 8 else 0 for s in scores_raw])
+
+        avg_val_loss = np.mean(val_losses)
+        preds_np     = np.array(all_preds)
+        hard_tgt_np  = np.array(all_hard_tgt)
+
+        val_auc = (roc_auc_score(hard_tgt_np, preds_np)
+                   if len(np.unique(hard_tgt_np)) > 1 else 0.0)
+
+        # Track best val AUC (for reporting)
         if val_auc > best_val_auc:
-            best_val_auc = val_auc
-            best_probs   = val_probs.copy()
+            best_val_auc   = val_auc
+            best_val_probs = preds_np.copy()
 
-        # Early stopping on val loss
-        if val_loss < best_val_loss:
-            best_val_loss  = val_loss
+        # Early stopping on val loss (matches Phase 3)
+        if avg_val_loss < best_val_loss:
+            best_val_loss  = avg_val_loss
+            loss_val_probs = preds_np.copy()
             patience_count = 0
         else:
             patience_count += 1
             if patience_count >= PATIENCE:
-                print(f"    Early stop at epoch {epoch+1}")
+                print(f"    Early stop at epoch {epoch+1}  "
+                      f"(best val_loss={best_val_loss:.4f}, best AUC={best_val_auc:.4f})")
                 break
 
-    return best_val_auc, best_probs
+    return best_val_auc, best_val_probs, loss_val_probs
 
 
+# ─────────────────────────────────────────────────────────────────────
+# [2] MLP — Soft labels (matches Phase 3 best_model.pt)
+# ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("[2] MLP retrained — Hard labels (matches thesis config)")
+print("[2] MLP — Soft labels  (matches Phase 3 cell 75 / best_model.pt)")
 print("="*60)
-mlp_hard_auc, mlp_hard_probs = train_mlp(
-    X_train, y_train_hard, X_val, y_val_hard, label_mode="hard"
+mlp_soft_auc, mlp_soft_probs_bestauc, mlp_soft_probs_bestloss = train_mlp(
+    train_dataset, val_dataset, label_mode="soft"
 )
-print(f"  Best Val AUC: {mlp_hard_auc:.4f}")
+print(f"  Best Val AUC : {mlp_soft_auc:.4f}  (at best-AUC epoch)")
+print(f"  AUC at best-loss epoch: "
+      f"{roc_auc_score(y_val_hard, mlp_soft_probs_bestloss):.4f}  "
+      f"(what best_model.pt saves)")
 
+
+# ─────────────────────────────────────────────────────────────────────
+# [3] MLP — Hard labels (label ablation, matches cell 80)
+# ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("[3] MLP retrained — Soft labels (label ablation)")
+print("[3] MLP — Hard labels  (label ablation, matches cell 80)")
 print("="*60)
-mlp_soft_auc, mlp_soft_probs = train_mlp(
-    X_train, y_train_soft, X_val, y_val_hard, label_mode="soft"
+mlp_hard_auc, mlp_hard_probs_bestauc, mlp_hard_probs_bestloss = train_mlp(
+    train_dataset, val_dataset, label_mode="hard"
 )
-print(f"  Best Val AUC: {mlp_soft_auc:.4f}")
+print(f"  Best Val AUC : {mlp_hard_auc:.4f}  (at best-AUC epoch)")
+print(f"  AUC at best-loss epoch: "
+      f"{roc_auc_score(y_val_hard, mlp_hard_probs_bestloss):.4f}")
 
 
-# ── Summary: LR vs MLP ───────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# Summary: LR vs MLP AUC
+# ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("SUMMARY — Linear vs Non-linear (turn-level AUC, hard labels)")
+print("SUMMARY — Linear vs Non-linear (turn-level AUC, hard label eval)")
 print("="*60)
-print(f"  {'Model':<35} {'AUC':>6}")
-print(f"  {'-'*42}")
-print(f"  {'Logistic Regression (linear)':<35} {lr_auc:.4f}")
-print(f"  {'MLP — Hard labels':<35} {mlp_hard_auc:.4f}")
-print(f"  {'MLP — Soft labels':<35} {mlp_soft_auc:.4f}")
-print(f"  {'-'*42}")
-print(f"  Delta (MLP hard - LR)          : {mlp_hard_auc - lr_auc:+.4f}")
-print(f"  Delta (MLP hard - MLP soft)    : {mlp_hard_auc - mlp_soft_auc:+.4f}")
+print(f"  {'Model':<40} {'AUC':>6}")
+print(f"  {'-'*47}")
+print(f"  {'Logistic Regression (hard labels, scaled)':<40} {lr_auc:.4f}")
+print(f"  {'MLP — Soft labels  (best AUC epoch)':<40} {mlp_soft_auc:.4f}")
+print(f"  {'MLP — Hard labels  (best AUC epoch)':<40} {mlp_hard_auc:.4f}")
+print(f"  {'-'*47}")
+print(f"  Delta (MLP soft - LR)  : {mlp_soft_auc - lr_auc:+.4f}")
+print(f"  Delta (MLP hard - LR)  : {mlp_hard_auc - lr_auc:+.4f}")
+print(f"  Delta (hard - soft MLP): {mlp_hard_auc - mlp_soft_auc:+.4f}")
 print("="*60)
-if mlp_hard_auc > lr_auc:
-    print("  => Non-linearity HELPS: MLP (hard) outperforms LR")
-else:
-    print("  => Non-linearity does NOT help: LR >= MLP (hard)")
 
 
-# ── Per-turn vs Trajectory-level FPR at tau=0.4 (hard-label MLP) ─────
+# ─────────────────────────────────────────────────────────────────────
+# EWL evaluation function — matches Phase 3 cell 77
+# ─────────────────────────────────────────────────────────────────────
+def evaluate_ewl(val_data, val_probs, tau_list=TAU_SWEEP):
+    """
+    Evaluate detection metrics + EWL for each tau.
+    val_probs: flat array of MLP outputs for all val turns (in order).
+    Matches Phase 3 cell 77 logic exactly.
+    """
+    # Rebuild per-trajectory prob sequences
+    traj_probs = []
+    turn_idx = 0
+    for traj in val_data:
+        n = len(traj["scores"])
+        traj_probs.append({
+            "probs":    val_probs[turn_idx : turn_idx + n],
+            "scores":   traj["scores"],
+            "label":    traj["label"],
+            "jb_turn":  next((i for i, s in enumerate(traj["scores"]) if s > 8), None),
+        })
+        turn_idx += n
+
+    print(f"\n  {'tau':>4}  {'P':>6}  {'R':>6}  {'F1':>6}  {'FPR':>6}  "
+          f"{'EW_mean':>8}  {'EW_med':>7}  {'TP':>3} {'FP':>3} {'FN':>3} {'TN':>3}")
+    print(f"  {'─'*4}  {'─'*6}  {'─'*6}  {'─'*6}  {'─'*6}  "
+          f"{'─'*8}  {'─'*7}  {'─'*3} {'─'*3} {'─'*3} {'─'*3}")
+
+    for tau in tau_list:
+        tp = fp = fn = tn = 0
+        latencies = []
+
+        for ex in traj_probs:
+            # First turn where D_t > tau
+            det_turn = next((i for i, p in enumerate(ex["probs"]) if p > tau), None)
+            label    = ex["label"]
+            jb_turn  = ex["jb_turn"]
+
+            if label == 1:                      # jailbroken trajectory
+                if det_turn is not None:
+                    tp += 1
+                    if jb_turn is not None:
+                        latencies.append(jb_turn - det_turn)
+                else:
+                    fn += 1
+            else:                               # safe trajectory
+                if det_turn is not None:
+                    fp += 1
+                else:
+                    tn += 1
+
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+        fpr  = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+        ew_mean   = np.mean(latencies)   if latencies else float("nan")
+        ew_median = np.median(latencies) if latencies else float("nan")
+
+        print(f"  {tau:4.1f}  {prec:6.3f}  {rec:6.3f}  {f1:6.3f}  {fpr:6.3f}  "
+              f"{ew_mean:+8.1f}  {ew_median:+7.1f}  {tp:3d} {fp:3d} {fn:3d} {tn:3d}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# EWL: Soft-label MLP (best-AUC epoch)
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("EWL — MLP Soft labels (best-AUC epoch)")
+print("  [Compare to Phase 3 cell 77 no-smoothing table]")
+print("="*60)
+evaluate_ewl(val_dataset, mlp_soft_probs_bestauc)
+
+print("\n" + "="*60)
+print("EWL — MLP Soft labels (best-loss epoch / what best_model.pt saves)")
+print("="*60)
+evaluate_ewl(val_dataset, mlp_soft_probs_bestloss)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# EWL: Hard-label MLP (best-AUC epoch)
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("EWL — MLP Hard labels (best-AUC epoch)")
+print("="*60)
+evaluate_ewl(val_dataset, mlp_hard_probs_bestauc)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FPR breakdown at tau=0.4 — Soft-label MLP (best-loss / deployed model)
+# ─────────────────────────────────────────────────────────────────────
 print(f"\n" + "="*60)
-print(f"FPR BREAKDOWN AT tau={TAU}  [using hard-label MLP]")
+print(f"FPR BREAKDOWN AT tau={TAU_FPR}  [soft-label MLP, best-loss epoch]")
+print(f"  (This is the deployed model used in Phase 4 & 5)")
 print("="*60)
 
-# Turn-level FPR
-safe_mask   = (y_val_hard == 0)
-n_safe      = safe_mask.sum()
-n_fp_turns  = ((mlp_hard_probs > TAU) & safe_mask).sum()
-turn_fpr    = n_fp_turns / n_safe
+probs = mlp_soft_probs_bestloss
+
+# Turn-level
+safe_mask  = (y_val_hard == 0)
+n_safe     = int(safe_mask.sum())
+n_fp_turns = int(((probs > TAU_FPR) & safe_mask).sum())
+turn_fpr   = n_fp_turns / n_safe
 
 print(f"\n  Turn-level (per individual turn):")
-print(f"    Safe turns          : {n_safe}")
-print(f"    Turns with D_t>{TAU} : {n_fp_turns}")
-print(f"    Turn-level FPR      : {turn_fpr:.3f}  ({turn_fpr*100:.1f}%)")
+print(f"    Safe turns           : {n_safe}")
+print(f"    Turns with D_t>{TAU_FPR} : {n_fp_turns}")
+print(f"    Turn-level FPR       : {turn_fpr:.3f}  ({turn_fpr*100:.1f}%)")
 
-# Trajectory-level FPR
+# Trajectory-level
 turn_idx = 0
 traj_fp, traj_tn = 0, 0
 for traj in val_dataset:
-    n_turns    = len(traj["scores"])
-    traj_label = traj["label"]
-    traj_probs = mlp_hard_probs[turn_idx : turn_idx + n_turns]
-    turn_idx  += n_turns
-    if traj_label == 0:
-        if (traj_probs > TAU).any():
+    n      = len(traj["scores"])
+    t_prob = probs[turn_idx : turn_idx + n]
+    turn_idx += n
+    if traj["label"] == 0:
+        if (t_prob > TAU_FPR).any():
             traj_fp += 1
         else:
             traj_tn += 1
 
 traj_fpr = traj_fp / (traj_fp + traj_tn)
-
-print(f"\n  Trajectory-level (fires on any turn in trajectory):")
-print(f"    Safe trajectories   : {traj_fp + traj_tn}")
-print(f"    FP trajectories     : {traj_fp}")
-print(f"    TN trajectories     : {traj_tn}")
-print(f"    Trajectory-level FPR: {traj_fpr:.3f}  ({traj_fpr*100:.1f}%)")
-print(f"    (Expected ~0.508 from Phase 3 cell 77 soft-label model)")
+print(f"\n  Trajectory-level (fires on any turn):")
+print(f"    Safe trajectories    : {traj_fp + traj_tn}")
+print(f"    FP trajectories      : {traj_fp}")
+print(f"    TN trajectories      : {traj_tn}")
+print(f"    Trajectory-level FPR : {traj_fpr:.3f}  ({traj_fpr*100:.1f}%)")
+print(f"    (Expected ~0.508 from Phase 3 cell 77)")
 
 print(f"\n  Summary:")
 print(f"    Turn-level FPR       : {turn_fpr:.3f}  <- % of safe turns steered")
