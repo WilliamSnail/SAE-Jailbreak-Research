@@ -1,4 +1,5 @@
 .env
 *.pt
+reference/thesis/
 results/feature_discovery/backup/
 # Results — large .pt activation files and trajectory outputs
