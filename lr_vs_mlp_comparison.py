@@ -272,49 +272,79 @@ def train_mlp(train_data, val_data, label_mode="soft", loss_mode="standard", see
 
 
 # ─────────────────────────────────────────────────────────────────────
-# [2] MLP — Soft labels (matches Phase 3 best_model.pt)
+# [2] MLP — Standard BCE × Soft labels  (deployed, matches cell 75)
 # ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("[2] MLP — Soft labels  (matches Phase 3 cell 75 / best_model.pt)")
+print("[2] MLP — Standard BCE × Soft labels  (deployed / cell 75)")
 print("="*60)
-mlp_soft_auc, mlp_soft_probs_bestauc, mlp_soft_probs_bestloss = train_mlp(
-    train_dataset, val_dataset, label_mode="soft"
+std_soft_auc, std_soft_probs_bestauc, std_soft_probs_bestloss = train_mlp(
+    train_dataset, val_dataset, label_mode="soft", loss_mode="standard"
 )
-print(f"  Best Val AUC : {mlp_soft_auc:.4f}  (at best-AUC epoch)")
+print(f"  Best Val AUC : {std_soft_auc:.4f}  (best-AUC epoch)")
 print(f"  AUC at best-loss epoch: "
-      f"{roc_auc_score(y_val_hard, mlp_soft_probs_bestloss):.4f}  "
+      f"{roc_auc_score(y_val_hard, std_soft_probs_bestloss):.4f}  "
       f"(what best_model.pt saves)")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# [3] MLP — Hard labels (label ablation, matches cell 80)
+# [3] MLP — Standard BCE × Hard labels
 # ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("[3] MLP — Hard labels  (label ablation, matches cell 80)")
+print("[3] MLP — Standard BCE × Hard labels")
 print("="*60)
-mlp_hard_auc, mlp_hard_probs_bestauc, mlp_hard_probs_bestloss = train_mlp(
-    train_dataset, val_dataset, label_mode="hard"
+std_hard_auc, std_hard_probs_bestauc, std_hard_probs_bestloss = train_mlp(
+    train_dataset, val_dataset, label_mode="hard", loss_mode="standard"
 )
-print(f"  Best Val AUC : {mlp_hard_auc:.4f}  (at best-AUC epoch)")
+print(f"  Best Val AUC : {std_hard_auc:.4f}  (best-AUC epoch)")
 print(f"  AUC at best-loss epoch: "
-      f"{roc_auc_score(y_val_hard, mlp_hard_probs_bestloss):.4f}")
+      f"{roc_auc_score(y_val_hard, std_hard_probs_bestloss):.4f}")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Summary: LR vs MLP AUC
+# [4] MLP — Softmax BCE × Soft labels
 # ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("SUMMARY — Linear vs Non-linear (turn-level AUC, hard label eval)")
+print("[4] MLP — Softmax BCE × Soft labels")
 print("="*60)
-print(f"  {'Model':<40} {'AUC':>6}")
-print(f"  {'-'*47}")
-print(f"  {'Logistic Regression (hard labels, scaled)':<40} {lr_auc:.4f}")
-print(f"  {'MLP — Soft labels  (best AUC epoch)':<40} {mlp_soft_auc:.4f}")
-print(f"  {'MLP — Hard labels  (best AUC epoch)':<40} {mlp_hard_auc:.4f}")
-print(f"  {'-'*47}")
-print(f"  Delta (MLP soft - LR)  : {mlp_soft_auc - lr_auc:+.4f}")
-print(f"  Delta (MLP hard - LR)  : {mlp_hard_auc - lr_auc:+.4f}")
-print(f"  Delta (hard - soft MLP): {mlp_hard_auc - mlp_soft_auc:+.4f}")
+sfx_soft_auc, sfx_soft_probs_bestauc, sfx_soft_probs_bestloss = train_mlp(
+    train_dataset, val_dataset, label_mode="soft", loss_mode="softmax"
+)
+print(f"  Best Val AUC : {sfx_soft_auc:.4f}  (best-AUC epoch)")
+print(f"  AUC at best-loss epoch: "
+      f"{roc_auc_score(y_val_hard, sfx_soft_probs_bestloss):.4f}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# [5] MLP — Softmax BCE × Hard labels  (best AUC in cell 82)
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("[5] MLP — Softmax BCE × Hard labels  (best AUC / cell 82)")
+print("="*60)
+sfx_hard_auc, sfx_hard_probs_bestauc, sfx_hard_probs_bestloss = train_mlp(
+    train_dataset, val_dataset, label_mode="hard", loss_mode="softmax"
+)
+print(f"  Best Val AUC : {sfx_hard_auc:.4f}  (best-AUC epoch)")
+print(f"  AUC at best-loss epoch: "
+      f"{roc_auc_score(y_val_hard, sfx_hard_probs_bestloss):.4f}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Summary: LR vs all MLP variants — AUC
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("SUMMARY — 2×2 MLP ablation + LR (turn-level AUC, hard label eval)")
+print("="*60)
+print(f"  {'Model':<44} {'AUC':>6}")
+print(f"  {'-'*51}")
+print(f"  {'Logistic Regression (hard labels, scaled)':<44} {lr_auc:.4f}")
+print(f"  {'-'*51}")
+print(f"  {'MLP Standard BCE × Soft  (deployed)':<44} {std_soft_auc:.4f}")
+print(f"  {'MLP Standard BCE × Hard':<44} {std_hard_auc:.4f}")
+print(f"  {'MLP Softmax BCE × Soft':<44} {sfx_soft_auc:.4f}")
+print(f"  {'MLP Softmax BCE × Hard':<44} {sfx_hard_auc:.4f}")
+print(f"  {'-'*51}")
+print(f"  Delta (best MLP - LR): "
+      f"{max(std_soft_auc, std_hard_auc, sfx_soft_auc, sfx_hard_auc) - lr_auc:+.4f}")
 print("="*60)
 
 
@@ -380,38 +410,56 @@ def evaluate_ewl(val_data, val_probs, tau_list=TAU_SWEEP):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# EWL: Soft-label MLP (best-AUC epoch)
+# EWL: Standard BCE × Soft (best-AUC epoch vs best-loss epoch)
 # ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("EWL — MLP Soft labels (best-AUC epoch)")
+print("EWL — Standard BCE × Soft  (best-AUC epoch)")
 print("  [Compare to Phase 3 cell 77 no-smoothing table]")
 print("="*60)
-evaluate_ewl(val_dataset, mlp_soft_probs_bestauc)
+evaluate_ewl(val_dataset, std_soft_probs_bestauc)
 
 print("\n" + "="*60)
-print("EWL — MLP Soft labels (best-loss epoch / what best_model.pt saves)")
+print("EWL — Standard BCE × Soft  (best-loss epoch / what best_model.pt saves)")
 print("="*60)
-evaluate_ewl(val_dataset, mlp_soft_probs_bestloss)
+evaluate_ewl(val_dataset, std_soft_probs_bestloss)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# EWL: Hard-label MLP (best-AUC epoch)
+# EWL: Standard BCE × Hard
 # ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("EWL — MLP Hard labels (best-AUC epoch)")
+print("EWL — Standard BCE × Hard")
 print("="*60)
-evaluate_ewl(val_dataset, mlp_hard_probs_bestauc)
+evaluate_ewl(val_dataset, std_hard_probs_bestauc)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# FPR breakdown at tau=0.4 — Soft-label MLP (best-loss / deployed model)
+# EWL: Softmax BCE × Soft
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("EWL — Softmax BCE × Soft")
+print("="*60)
+evaluate_ewl(val_dataset, sfx_soft_probs_bestauc)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# EWL: Softmax BCE × Hard
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("EWL — Softmax BCE × Hard")
+print("="*60)
+evaluate_ewl(val_dataset, sfx_hard_probs_bestauc)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FPR breakdown at tau=0.4 — Standard+Soft (best-loss / deployed model)
 # ─────────────────────────────────────────────────────────────────────
 print(f"\n" + "="*60)
-print(f"FPR BREAKDOWN AT tau={TAU_FPR}  [soft-label MLP, best-loss epoch]")
+print(f"FPR BREAKDOWN AT tau={TAU_FPR}  [Standard BCE × Soft, best-loss epoch]")
 print(f"  (This is the deployed model used in Phase 4 & 5)")
 print("="*60)
 
-probs = mlp_soft_probs_bestloss
+probs = std_soft_probs_bestloss
 
 # Turn-level
 safe_mask  = (y_val_hard == 0)
