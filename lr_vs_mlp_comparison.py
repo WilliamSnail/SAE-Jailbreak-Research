@@ -42,8 +42,9 @@ MLP_DROPOUT = 0.2
 MLP_LR      = 1e-3
 MLP_EPOCHS  = 100
 PATIENCE    = 10
-SEED        = 42
-TAU_SWEEP   = [0.3, 0.4, 0.5, 0.6]
+SEED             = 42
+ABLATION_SEEDS   = [42, 123, 456, 789, 1024]   # matches Phase 3 cell 82
+TAU_SWEEP        = [0.3, 0.4, 0.5, 0.6]
 TAU_FPR     = 0.4   # threshold used for FPR breakdown
 
 PHASE3_DIR   = Path("C:\\Users\\Lab622_TV\\Documents\\GitHub\\SAE-Jailbreak-Research\\results\\mlp_detector")
@@ -272,194 +273,169 @@ def train_mlp(train_data, val_data, label_mode="soft", loss_mode="standard", see
 
 
 # ─────────────────────────────────────────────────────────────────────
-# [2] MLP — Standard BCE × Soft labels  (deployed, matches cell 75)
+# [2–5] MLP 2×2 ablation — 5 seeds each (matches Phase 3 ABLATION_SEEDS)
 # ─────────────────────────────────────────────────────────────────────
-print("\n" + "="*60)
-print("[2] MLP — Standard BCE × Soft labels  (deployed / cell 75)")
-print("="*60)
-std_soft_auc, std_soft_probs_bestauc, std_soft_probs_bestloss = train_mlp(
-    train_dataset, val_dataset, label_mode="soft", loss_mode="standard"
-)
-print(f"  Best Val AUC : {std_soft_auc:.4f}  (best-AUC epoch)")
-print(f"  AUC at best-loss epoch: "
-      f"{roc_auc_score(y_val_hard, std_soft_probs_bestloss):.4f}  "
-      f"(what best_model.pt saves)")
+VARIANTS = [
+    ("Standard BCE × Soft (deployed)", "soft", "standard"),
+    ("Standard BCE × Hard",            "hard", "standard"),
+    ("Softmax BCE  × Soft",            "soft", "softmax"),
+    ("Softmax BCE  × Hard",            "hard", "softmax"),
+]
+
+# Results store: variant_name → list of (auc, best_probs) per seed
+variant_results = {}   # name → {"aucs": [], "probs_per_seed": []}
+
+for v_name, lbl, loss in VARIANTS:
+    print("\n" + "="*60)
+    print(f"MLP — {v_name}  (5 seeds)")
+    print("="*60)
+    aucs, probs_list = [], []
+    for s in ABLATION_SEEDS:
+        auc, probs_bestauc, _ = train_mlp(
+            train_dataset, val_dataset,
+            label_mode=lbl, loss_mode=loss, seed=s
+        )
+        aucs.append(auc)
+        probs_list.append(probs_bestauc)
+        print(f"  seed={s:4d}  AUC={auc:.4f}")
+    print(f"  Mean AUC : {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
+    variant_results[v_name] = {"aucs": aucs, "probs_per_seed": probs_list,
+                                "label_mode": lbl, "loss_mode": loss}
 
 
 # ─────────────────────────────────────────────────────────────────────
-# [3] MLP — Standard BCE × Hard labels
-# ─────────────────────────────────────────────────────────────────────
-print("\n" + "="*60)
-print("[3] MLP — Standard BCE × Hard labels")
-print("="*60)
-std_hard_auc, std_hard_probs_bestauc, std_hard_probs_bestloss = train_mlp(
-    train_dataset, val_dataset, label_mode="hard", loss_mode="standard"
-)
-print(f"  Best Val AUC : {std_hard_auc:.4f}  (best-AUC epoch)")
-print(f"  AUC at best-loss epoch: "
-      f"{roc_auc_score(y_val_hard, std_hard_probs_bestloss):.4f}")
-
-
-# ─────────────────────────────────────────────────────────────────────
-# [4] MLP — Softmax BCE × Soft labels
-# ─────────────────────────────────────────────────────────────────────
-print("\n" + "="*60)
-print("[4] MLP — Softmax BCE × Soft labels")
-print("="*60)
-sfx_soft_auc, sfx_soft_probs_bestauc, sfx_soft_probs_bestloss = train_mlp(
-    train_dataset, val_dataset, label_mode="soft", loss_mode="softmax"
-)
-print(f"  Best Val AUC : {sfx_soft_auc:.4f}  (best-AUC epoch)")
-print(f"  AUC at best-loss epoch: "
-      f"{roc_auc_score(y_val_hard, sfx_soft_probs_bestloss):.4f}")
-
-
-# ─────────────────────────────────────────────────────────────────────
-# [5] MLP — Softmax BCE × Hard labels  (best AUC in cell 82)
-# ─────────────────────────────────────────────────────────────────────
-print("\n" + "="*60)
-print("[5] MLP — Softmax BCE × Hard labels  (best AUC / cell 82)")
-print("="*60)
-sfx_hard_auc, sfx_hard_probs_bestauc, sfx_hard_probs_bestloss = train_mlp(
-    train_dataset, val_dataset, label_mode="hard", loss_mode="softmax"
-)
-print(f"  Best Val AUC : {sfx_hard_auc:.4f}  (best-AUC epoch)")
-print(f"  AUC at best-loss epoch: "
-      f"{roc_auc_score(y_val_hard, sfx_hard_probs_bestloss):.4f}")
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Summary: LR vs all MLP variants — AUC
+# Summary: LR vs all MLP variants — AUC (mean ± std)
 # ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
 print("SUMMARY — 2×2 MLP ablation + LR (turn-level AUC, hard label eval)")
 print("="*60)
-print(f"  {'Model':<44} {'AUC':>6}")
-print(f"  {'-'*51}")
-print(f"  {'Logistic Regression (hard labels, scaled)':<44} {lr_auc:.4f}")
-print(f"  {'-'*51}")
-print(f"  {'MLP Standard BCE × Soft  (deployed)':<44} {std_soft_auc:.4f}")
-print(f"  {'MLP Standard BCE × Hard':<44} {std_hard_auc:.4f}")
-print(f"  {'MLP Softmax BCE × Soft':<44} {sfx_soft_auc:.4f}")
-print(f"  {'MLP Softmax BCE × Hard':<44} {sfx_hard_auc:.4f}")
-print(f"  {'-'*51}")
-print(f"  Delta (best MLP - LR): "
-      f"{max(std_soft_auc, std_hard_auc, sfx_soft_auc, sfx_hard_auc) - lr_auc:+.4f}")
+print(f"  {'Model':<44} {'AUC (mean ± std)':>18}")
+print(f"  {'-'*63}")
+print(f"  {'Logistic Regression (hard labels, scaled)':<44} {'':>9}{lr_auc:.4f}")
+print(f"  {'-'*63}")
+for v_name, res in variant_results.items():
+    aucs = res["aucs"]
+    print(f"  {v_name:<44} {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
 print("="*60)
 
 
 # ─────────────────────────────────────────────────────────────────────
 # EWL evaluation function — matches Phase 3 cell 77
+# Returns dict: tau → {prec, rec, f1, fpr, ew_mean, ew_med, tp, fp, fn, tn}
 # ─────────────────────────────────────────────────────────────────────
-def evaluate_ewl(val_data, val_probs, tau_list=TAU_SWEEP):
+def compute_ewl_metrics(val_data, val_probs, tau_list=TAU_SWEEP):
     """
-    Evaluate detection metrics + EWL for each tau.
+    Compute detection metrics + EWL for each tau.
     val_probs: flat array of MLP outputs for all val turns (in order).
     Matches Phase 3 cell 77 logic exactly.
+    Returns dict keyed by tau.
     """
-    # Rebuild per-trajectory prob sequences
     traj_probs = []
     turn_idx = 0
     for traj in val_data:
         n = len(traj["scores"])
         traj_probs.append({
-            "probs":    val_probs[turn_idx : turn_idx + n],
-            "scores":   traj["scores"],
-            "label":    traj["label"],
-            "jb_turn":  next((i for i, s in enumerate(traj["scores"]) if s > 8), None),
+            "probs":   val_probs[turn_idx : turn_idx + n],
+            "scores":  traj["scores"],
+            "label":   traj["label"],
+            "jb_turn": next((i for i, s in enumerate(traj["scores"]) if s > 8), None),
         })
         turn_idx += n
 
-    print(f"\n  {'tau':>4}  {'P':>6}  {'R':>6}  {'F1':>6}  {'FPR':>6}  "
-          f"{'EW_mean':>8}  {'EW_med':>7}  {'TP':>3} {'FP':>3} {'FN':>3} {'TN':>3}")
-    print(f"  {'─'*4}  {'─'*6}  {'─'*6}  {'─'*6}  {'─'*6}  "
-          f"{'─'*8}  {'─'*7}  {'─'*3} {'─'*3} {'─'*3} {'─'*3}")
-
+    results = {}
     for tau in tau_list:
         tp = fp = fn = tn = 0
         latencies = []
-
         for ex in traj_probs:
-            # First turn where D_t > tau
             det_turn = next((i for i, p in enumerate(ex["probs"]) if p > tau), None)
-            label    = ex["label"]
-            jb_turn  = ex["jb_turn"]
-
-            if label == 1:                      # jailbroken trajectory
+            if ex["label"] == 1:
                 if det_turn is not None:
                     tp += 1
-                    if jb_turn is not None:
-                        latencies.append(jb_turn - det_turn)
+                    if ex["jb_turn"] is not None:
+                        latencies.append(ex["jb_turn"] - det_turn)
                 else:
                     fn += 1
-            else:                               # safe trajectory
+            else:
                 if det_turn is not None:
                     fp += 1
                 else:
                     tn += 1
-
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
         fpr  = fp / (fp + tn) if (fp + tn) > 0 else 0.0
-        ew_mean   = np.mean(latencies)   if latencies else float("nan")
-        ew_median = np.median(latencies) if latencies else float("nan")
-
-        print(f"  {tau:4.1f}  {prec:6.3f}  {rec:6.3f}  {f1:6.3f}  {fpr:6.3f}  "
-              f"{ew_mean:+8.1f}  {ew_median:+7.1f}  {tp:3d} {fp:3d} {fn:3d} {tn:3d}")
-
-
-# ─────────────────────────────────────────────────────────────────────
-# EWL: Standard BCE × Soft (best-AUC epoch vs best-loss epoch)
-# ─────────────────────────────────────────────────────────────────────
-print("\n" + "="*60)
-print("EWL — Standard BCE × Soft  (best-AUC epoch)")
-print("  [Compare to Phase 3 cell 77 no-smoothing table]")
-print("="*60)
-evaluate_ewl(val_dataset, std_soft_probs_bestauc)
-
-print("\n" + "="*60)
-print("EWL — Standard BCE × Soft  (best-loss epoch / what best_model.pt saves)")
-print("="*60)
-evaluate_ewl(val_dataset, std_soft_probs_bestloss)
+        results[tau] = dict(
+            prec=prec, rec=rec, f1=f1, fpr=fpr,
+            ew_mean=(np.mean(latencies)   if latencies else float("nan")),
+            ew_med= (np.median(latencies) if latencies else float("nan")),
+            tp=tp, fp=fp, fn=fn, tn=tn,
+        )
+    return results
 
 
-# ─────────────────────────────────────────────────────────────────────
-# EWL: Standard BCE × Hard
-# ─────────────────────────────────────────────────────────────────────
-print("\n" + "="*60)
-print("EWL — Standard BCE × Hard")
-print("="*60)
-evaluate_ewl(val_dataset, std_hard_probs_bestauc)
+def print_ewl_table(metrics_by_tau, tau_list=TAU_SWEEP):
+    print(f"\n  {'tau':>4}  {'P':>6}  {'R':>6}  {'F1':>6}  {'FPR':>6}  "
+          f"{'EW_mean':>8}  {'EW_med':>7}  {'TP':>3} {'FP':>3} {'FN':>3} {'TN':>3}")
+    print(f"  {'─'*4}  {'─'*6}  {'─'*6}  {'─'*6}  {'─'*6}  "
+          f"{'─'*8}  {'─'*7}  {'─'*3} {'─'*3} {'─'*3} {'─'*3}")
+    for tau in tau_list:
+        m = metrics_by_tau[tau]
+        print(f"  {tau:4.1f}  {m['prec']:6.3f}  {m['rec']:6.3f}  {m['f1']:6.3f}  "
+              f"{m['fpr']:6.3f}  {m['ew_mean']:+8.1f}  {m['ew_med']:+7.1f}  "
+              f"{m['tp']:3d} {m['fp']:3d} {m['fn']:3d} {m['tn']:3d}")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# EWL: Softmax BCE × Soft
+# EWL: 5-seed evaluation for all 4 MLP variants
+# Reports mean ± std of EW_mean and EW_med across seeds at each tau
 # ─────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("EWL — Softmax BCE × Soft")
+print("EWL — 5-seed mean ± std across all variants")
 print("="*60)
-evaluate_ewl(val_dataset, sfx_soft_probs_bestauc)
+
+# Per-seed EWL table for the deployed model (Standard+Soft) — for
+# comparison against Phase 3 cell 77
+deployed_name = "Standard BCE × Soft (deployed)"
+print(f"\n--- Per-seed EWL: {deployed_name} ---")
+for s, probs in zip(ABLATION_SEEDS, variant_results[deployed_name]["probs_per_seed"]):
+    print(f"  seed={s}")
+    m = compute_ewl_metrics(val_dataset, probs)
+    print_ewl_table(m)
+
+# Aggregate: for each variant, collect EW_mean and EW_med per tau across seeds
+print("\n--- 5-seed aggregate EWL (mean ± std) ---")
+for v_name, res in variant_results.items():
+    print(f"\n  {v_name}")
+    # Collect per-seed metrics
+    seed_metrics = [
+        compute_ewl_metrics(val_dataset, probs)
+        for probs in res["probs_per_seed"]
+    ]
+    print(f"  {'tau':>4}  {'EW_mean (mean±std)':>20}  {'EW_med (mean±std)':>20}  "
+          f"{'FPR (mean±std)':>18}")
+    print(f"  {'─'*4}  {'─'*20}  {'─'*20}  {'─'*18}")
+    for tau in TAU_SWEEP:
+        ew_means = [sm[tau]["ew_mean"] for sm in seed_metrics]
+        ew_meds  = [sm[tau]["ew_med"]  for sm in seed_metrics]
+        fprs     = [sm[tau]["fpr"]     for sm in seed_metrics]
+        # nan-safe
+        ew_means_clean = [x for x in ew_means if not np.isnan(x)]
+        ew_meds_clean  = [x for x in ew_meds  if not np.isnan(x)]
+        m_mean = f"{np.mean(ew_means_clean):+.2f}±{np.std(ew_means_clean):.2f}" if ew_means_clean else "nan"
+        m_med  = f"{np.mean(ew_meds_clean):+.2f}±{np.std(ew_meds_clean):.2f}"  if ew_meds_clean  else "nan"
+        m_fpr  = f"{np.mean(fprs):.3f}±{np.std(fprs):.3f}"
+        print(f"  {tau:4.1f}  {m_mean:>20}  {m_med:>20}  {m_fpr:>18}")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# EWL: Softmax BCE × Hard
-# ─────────────────────────────────────────────────────────────────────
-print("\n" + "="*60)
-print("EWL — Softmax BCE × Hard")
-print("="*60)
-evaluate_ewl(val_dataset, sfx_hard_probs_bestauc)
-
-
-# ─────────────────────────────────────────────────────────────────────
-# FPR breakdown at tau=0.4 — Standard+Soft (best-loss / deployed model)
+# FPR breakdown at tau=0.4 — Standard+Soft seed=42 (for reference)
 # ─────────────────────────────────────────────────────────────────────
 print(f"\n" + "="*60)
-print(f"FPR BREAKDOWN AT tau={TAU_FPR}  [Standard BCE × Soft, best-loss epoch]")
-print(f"  (This is the deployed model used in Phase 4 & 5)")
+print(f"FPR BREAKDOWN AT tau={TAU_FPR}  [Standard BCE × Soft, seed=42]")
+print(f"  (Reference: deployed model used in Phase 4 & 5 is best_model.pt)")
 print("="*60)
 
-probs = std_soft_probs_bestloss
+probs = variant_results["Standard BCE × Soft (deployed)"]["probs_per_seed"][0]  # seed=42
 
 # Turn-level
 safe_mask  = (y_val_hard == 0)
