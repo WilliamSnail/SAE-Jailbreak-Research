@@ -1994,6 +1994,45 @@ All modes produce ~+10–13pp regardless of which features are steered or correc
 
 **Definitive test:** Run with `INTERVENTION_TAU = 999` (never triggers hooked path) through the Phase 5 pipeline for 2 runs. If ASR returns to ~41%, the hooked code path is the culprit. If ASR is still ~53%, the increase is due to variance or environmental confound, not the intervention system.
 
+### 8.1.4 Root Cause Confirmed: Sampling Parameter Mismatch (V-1.8)
+
+**tau=999 result: ASR = 42.5% (+1.3pp)** — within baseline variance (2-run bootstrap range: 39.0%–43.5%). Confirms the hooked code path is the culprit, not variance.
+
+**Baseline variance analysis (5 runs):**
+- Per-run ASR: 38.0%, 45.0%, 40.0%, 41.0%, 42.0% (mean=41.2%, std=2.3%)
+- 2-run bootstrap range: 39.0%–43.5% (std=1.4%)
+- All intervention ASRs (51–54.5%) are 5–8 standard deviations above the 2-run baseline range.
+
+**Root cause: mixed sampling regimes within a single trajectory.**
+
+Phase 5 uses two different generation paths depending on whether the MLP detector triggers:
+
+| Parameter | `_plain_target_generate()` (non-triggered) | NNSight hooked path (triggered) | Phase 1 `target_generate()` (all turns) |
+|---|---|---|---|
+| Engine | HuggingFace `model._model.generate()` | NNSight `model.generate()` | NNSight `model.generate()` |
+| `temperature` | **0.7** (explicit) | **1.0** (Gemma default) | **1.0** (Gemma default) |
+| `top_k` | disabled | **64** (Gemma default) | **64** (Gemma default) |
+| `top_p` | disabled | **0.95** (Gemma default) | **0.95** (Gemma default) |
+| `repetition_penalty` | 1.0 (HF default) | 1.0 (HF default) | **1.2** (explicit) |
+| `do_sample` | True (explicit) | True (Gemma default) | True (Gemma default) |
+
+Gemma-3-4b-it model `generation_config.json`: `{"do_sample": true, "top_k": 64, "top_p": 0.95}`.
+
+Both **consistent** paths produce baseline-level ASR:
+- Phase 1 (all NNSight, temp=1.0): **41.2%**
+- Phase 5 tau=999 (all plain HF, temp=0.7): **42.5%**
+- Phase 5 tau=0.4 (**mixed** plain + NNSight): **51–54.5%**
+
+The ~28% of turns where intervention triggers switch from temp=0.7 (focused) to temp=1.0 (diverse). On already-escalating turns (D_t > 0.4), the extra randomness produces more varied outputs that can include harmful content the attacker builds on in subsequent turns.
+
+**Fix (V-1.9):** Use a single generation backend for all turns. Two options:
+
+1. **Use NNSight for all turns** — both triggered and non-triggered. Non-triggered turns use `model.generate()` without hooks (same as Phase 1). Triggered turns use `model.generate()` with correction hooks. Both paths share identical sampling defaults from `generation_config.json`. This is the cleanest fix: matches Phase 1 behavior exactly and avoids maintaining two separate generation backends.
+
+2. **Pass explicit kwargs to hooked path** — add `temperature=0.7, do_sample=True` to the NNSight `model.generate()` call. Simpler code change but still maintains two backends.
+
+Option 1 is preferred: single backend eliminates the class of bugs entirely.
+
 ### 8.2 Intervention Feature Set Ablation
 
 The current plan intervenes on 131 causal drivers (subset of 435 EN features). We should ablate whether expanding the intervention surface improves ASR reduction.
