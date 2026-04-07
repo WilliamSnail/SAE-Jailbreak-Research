@@ -24,7 +24,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 # ── Paths ────────────────────────────────────────────────────────────
-PHASE3_DIR = Path("results/mlp_detector")
+PHASE3_DIR = Path("C:\\Users\\Lab622_TV\\Documents\\GitHub\\SAE-Jailbreak-Research\\results\\mlp_detector")
 DATASET_PATH = PHASE3_DIR / "trajectory_dataset.pt"
 MODEL_PATH   = PHASE3_DIR / "best_model.pt"
 
