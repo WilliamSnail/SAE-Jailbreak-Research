@@ -1,21 +1,26 @@
 """
 lr_vs_mlp_comparison.py
 
-Compares Logistic Regression (linear) vs MLP (non-linear) on the same
-459 EN-selected features, same train/val split as Phase 3.
+Full 2x2 ablation: loss_mode x label_mode, plus LR baseline and EWL.
 
-Tests:
-  1. LR  — hard labels, scaled features (Fix 1: StandardScaler + max_iter=5000)
-  2. MLP — soft labels  (matches Phase 3 best_model.pt exactly)
-  3. MLP — hard labels  (label ablation, matches cell 80 ablation config)
-  4. EWL sweep at tau in {0.3, 0.4, 0.5, 0.6} for both MLP variants
-  5. Per-turn vs trajectory-level FPR at tau=0.4
+Variants trained:
+  Standard BCE  x Soft labels  (deployed model, matches Phase 3 cell 75)
+  Standard BCE  x Hard labels
+  Softmax BCE   x Soft labels  (matches Phase 3 cell 82 ablation)
+  Softmax BCE   x Hard labels  (best AUC in cell 82)
+
+Plus:
+  LR — hard labels, StandardScaler, max_iter=5000
+  EWL sweep at tau in {0.3, 0.4, 0.5, 0.6} for all 4 MLP variants
+  Per-turn vs trajectory-level FPR at tau=0.4 (deployed model)
 
 Training loop matches Phase 3 cell 75 exactly:
-  - Per-trajectory (not batched): loss.backward() called once per trajectory
-  - Standard BCE (uniform turn weighting)
+  - Per-trajectory (not batched)
   - Adam lr=1e-3, epochs=100, patience=10 on val loss
-  - Val AUC always evaluated with hard labels (score > 8), matching cell 75
+  - Val AUC always with hard labels (score > 8), matching cell 75
+
+SoftmaxWeightedBCE matches Phase 3 cell 72:
+  weights = softmax(raw_scores), loss = sum(w * BCE(pred, target))
 
 Usage:
   conda run -n sae python lr_vs_mlp_comparison.py
@@ -46,6 +51,18 @@ DATASET_PATH = PHASE3_DIR / "trajectory_dataset.pt"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
+
+
+# ── SoftmaxWeightedBCE (matches Phase 3 cell 72) ─────────────────────
+class SoftmaxWeightedBCE(nn.Module):
+    """
+    Weights each turn by softmax(raw_scores) so high-score turns
+    dominate the gradient. Matches cell 72 exactly.
+    """
+    def forward(self, predictions, targets, raw_scores):
+        weights      = F.softmax(raw_scores, dim=0)
+        per_turn_bce = F.binary_cross_entropy(predictions, targets, reduction="none")
+        return (weights * per_turn_bce).sum()
 
 
 # ── MLP architecture (matches Phase 3 cell 71) ───────────────────────
@@ -120,45 +137,47 @@ print(f"  Val AUC: {lr_auc:.4f}")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# MLP training function — matches Phase 3 cell 75 exactly
+# MLP training function — matches Phase 3 cells 75 & 82 exactly
 # ─────────────────────────────────────────────────────────────────────
-def train_mlp(train_data, val_data, label_mode="soft", seed=SEED):
+softmax_bce_fn = SoftmaxWeightedBCE()
+
+def train_mlp(train_data, val_data, label_mode="soft", loss_mode="standard", seed=SEED):
     """
-    Train MLP per-trajectory, matching Phase 3 cell 75.
+    Train MLP per-trajectory.
 
-    label_mode:
-      'soft' — training targets = score / 10.0  (Phase 3 default)
-      'hard' — training targets = 1 if score > 8 else 0  (ablation)
+    label_mode : 'soft' (score/10) | 'hard' (1 if score>8 else 0)
+    loss_mode  : 'standard' (uniform BCE) | 'softmax' (SoftmaxWeightedBCE)
 
-    Val loss uses same label_mode as training.
-    Val AUC always uses hard labels (score > 8), matching Phase 3.
+    Val loss uses same label_mode and loss_mode as training.
+    Val AUC always uses hard labels (score > 8), matching Phase 3 cell 75.
 
     Returns:
       best_val_auc   — highest val AUC seen during training
-      best_val_probs — val predictions at the epoch with best val AUC
-      loss_val_probs — val predictions at the epoch with best val loss
-                       (what best_model.pt would contain)
+      best_val_probs — val predictions at best-AUC epoch
+      loss_val_probs — val predictions at best-val-loss epoch
+                       (equivalent to what best_model.pt saves)
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    model = DecouplingMLP(input_dim=N_FEATURES).to(device)
+    model     = DecouplingMLP(input_dim=N_FEATURES).to(device)
     optimizer = optim.Adam(model.parameters(), lr=MLP_LR)
 
+    n_val_turns    = sum(len(t["scores"]) for t in val_data)
     best_val_loss  = float("inf")
     best_val_auc   = 0.0
-    best_val_probs = np.zeros(sum(len(t["scores"]) for t in val_data), dtype=np.float32)
-    loss_val_probs = best_val_probs.copy()
+    best_val_probs = np.zeros(n_val_turns, dtype=np.float32)
+    loss_val_probs = np.zeros(n_val_turns, dtype=np.float32)
     patience_count = 0
 
     for epoch in range(MLP_EPOCHS):
-        # ── Train: per-trajectory loop (matches cell 75) ──────────────
+        # ── Train: per-trajectory (matches cell 75) ───────────────────
         model.train()
         train_losses = []
         perm = np.random.permutation(len(train_data))
 
         for idx in perm:
-            traj = train_data[idx]
+            traj       = train_data[idx]
             features   = traj["features"]
             scores_raw = traj["scores"]
 
@@ -167,22 +186,22 @@ def train_mlp(train_data, val_data, label_mode="soft", seed=SEED):
 
             X_traj = torch.tensor(
                 np.stack(features), dtype=torch.float32, device=device
-            )  # (n_turns, N_FEATURES)
+            )
+            scores_t = torch.tensor(
+                scores_raw, dtype=torch.float32, device=device
+            )
 
-            # Label type — matches Phase 3 soft labels or ablation hard labels
             if label_mode == "soft":
-                targets = torch.tensor(
-                    [s / 10.0 for s in scores_raw],
-                    dtype=torch.float32, device=device
-                )
+                targets = scores_t / 10.0
             else:
-                targets = torch.tensor(
-                    [1.0 if s > 8 else 0.0 for s in scores_raw],
-                    dtype=torch.float32, device=device
-                )
+                targets = (scores_t > 8).float()
 
             preds = model(X_traj).squeeze(-1)
-            loss  = F.binary_cross_entropy(preds, targets)
+
+            if loss_mode == "softmax":
+                loss = softmax_bce_fn(preds, targets, scores_t)
+            else:
+                loss = F.binary_cross_entropy(preds, targets)
 
             optimizer.zero_grad()
             loss.backward()
@@ -193,7 +212,7 @@ def train_mlp(train_data, val_data, label_mode="soft", seed=SEED):
         model.eval()
         val_losses   = []
         all_preds    = []
-        all_hard_tgt = []   # always hard, for AUC (matches cell 75 `targets > 0.8`)
+        all_hard_tgt = []
 
         with torch.no_grad():
             for traj in val_data:
@@ -203,28 +222,28 @@ def train_mlp(train_data, val_data, label_mode="soft", seed=SEED):
                 if len(features) < 2:
                     continue
 
-                X_traj = torch.tensor(
+                X_traj   = torch.tensor(
                     np.stack(features), dtype=torch.float32, device=device
                 )
+                scores_t = torch.tensor(
+                    scores_raw, dtype=torch.float32, device=device
+                )
 
-                # Val loss uses same label type as training
                 if label_mode == "soft":
-                    val_targets = torch.tensor(
-                        [s / 10.0 for s in scores_raw],
-                        dtype=torch.float32, device=device
-                    )
+                    val_targets = scores_t / 10.0
                 else:
-                    val_targets = torch.tensor(
-                        [1.0 if s > 8 else 0.0 for s in scores_raw],
-                        dtype=torch.float32, device=device
-                    )
+                    val_targets = (scores_t > 8).float()
 
                 preds = model(X_traj).squeeze(-1)
-                loss  = F.binary_cross_entropy(preds, val_targets)
-                val_losses.append(loss.item())
 
+                if loss_mode == "softmax":
+                    loss = softmax_bce_fn(preds, val_targets, scores_t)
+                else:
+                    loss = F.binary_cross_entropy(preds, val_targets)
+
+                val_losses.append(loss.item())
                 all_preds.extend(preds.cpu().numpy())
-                # Hard labels for AUC — matches Phase 3: (targets > 0.8).int()
+                # AUC always hard labels (matches cell 75: targets > 0.8)
                 all_hard_tgt.extend([1 if s > 8 else 0 for s in scores_raw])
 
         avg_val_loss = np.mean(val_losses)
@@ -234,12 +253,10 @@ def train_mlp(train_data, val_data, label_mode="soft", seed=SEED):
         val_auc = (roc_auc_score(hard_tgt_np, preds_np)
                    if len(np.unique(hard_tgt_np)) > 1 else 0.0)
 
-        # Track best val AUC (for reporting)
         if val_auc > best_val_auc:
             best_val_auc   = val_auc
             best_val_probs = preds_np.copy()
 
-        # Early stopping on val loss (matches Phase 3)
         if avg_val_loss < best_val_loss:
             best_val_loss  = avg_val_loss
             loss_val_probs = preds_np.copy()
@@ -247,8 +264,8 @@ def train_mlp(train_data, val_data, label_mode="soft", seed=SEED):
         else:
             patience_count += 1
             if patience_count >= PATIENCE:
-                print(f"    Early stop at epoch {epoch+1}  "
-                      f"(best val_loss={best_val_loss:.4f}, best AUC={best_val_auc:.4f})")
+                print(f"    Early stop ep {epoch+1} "
+                      f"(best_loss={best_val_loss:.4f}, best_AUC={best_val_auc:.4f})")
                 break
 
     return best_val_auc, best_val_probs, loss_val_probs
