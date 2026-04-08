@@ -323,10 +323,13 @@ print("="*60)
 # EWL evaluation function — matches Phase 3 cell 77
 # Returns dict: tau → {prec, rec, f1, fpr, ew_mean, ew_med, tp, fp, fn, tn}
 # ─────────────────────────────────────────────────────────────────────
-def compute_ewl_metrics(val_data, val_probs, tau_list=TAU_SWEEP):
+def compute_ewl_metrics(val_data, val_probs, tau_list=TAU_SWEEP,
+                        y_hard=None):
     """
     Compute detection metrics + EWL for each tau.
-    val_probs: flat array of MLP outputs for all val turns (in order).
+    val_probs : flat array of MLP outputs for all val turns (in order).
+    y_hard    : flat array of hard labels (0/1) for turn-level FPR.
+                If None, turn-level FPR is not computed.
     Matches Phase 3 cell 77 logic exactly.
     Returns dict keyed by tau.
     """
@@ -363,9 +366,20 @@ def compute_ewl_metrics(val_data, val_probs, tau_list=TAU_SWEEP):
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-        fpr  = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+        traj_fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+        # Turn-level FPR: % of individual safe turns that exceed tau
+        if y_hard is not None:
+            safe_mask   = (y_hard == 0)
+            n_safe      = int(safe_mask.sum())
+            n_fp_turns  = int(((val_probs > tau) & safe_mask).sum())
+            turn_fpr    = n_fp_turns / n_safe if n_safe > 0 else 0.0
+        else:
+            turn_fpr = float("nan")
+
         results[tau] = dict(
-            prec=prec, rec=rec, f1=f1, fpr=fpr,
+            prec=prec, rec=rec, f1=f1,
+            traj_fpr=traj_fpr, turn_fpr=turn_fpr,
             ew_mean=(np.mean(latencies)   if latencies else float("nan")),
             ew_med= (np.median(latencies) if latencies else float("nan")),
             tp=tp, fp=fp, fn=fn, tn=tn,
@@ -381,7 +395,7 @@ def print_ewl_table(metrics_by_tau, tau_list=TAU_SWEEP):
     for tau in tau_list:
         m = metrics_by_tau[tau]
         print(f"  {tau:4.1f}  {m['prec']:6.3f}  {m['rec']:6.3f}  {m['f1']:6.3f}  "
-              f"{m['fpr']:6.3f}  {m['ew_mean']:+8.1f}  {m['ew_med']:+7.1f}  "
+              f"{m['traj_fpr']:6.3f}  {m['ew_mean']:+8.1f}  {m['ew_med']:+7.1f}  "
               f"{m['tp']:3d} {m['fp']:3d} {m['fn']:3d} {m['tn']:3d}")
 
 
@@ -399,32 +413,30 @@ deployed_name = "Standard BCE × Soft (deployed)"
 print(f"\n--- Per-seed EWL: {deployed_name} ---")
 for s, probs in zip(ABLATION_SEEDS, variant_results[deployed_name]["probs_per_seed"]):
     print(f"  seed={s}")
-    m = compute_ewl_metrics(val_dataset, probs)
+    m = compute_ewl_metrics(val_dataset, probs, y_hard=y_val_hard)
     print_ewl_table(m)
 
-# Aggregate: for each variant, collect EW_mean and EW_med per tau across seeds
+# Aggregate: for each variant, collect metrics per tau across seeds
 print("\n--- 5-seed aggregate EWL (mean ± std) ---")
 for v_name, res in variant_results.items():
     print(f"\n  {v_name}")
-    # Collect per-seed metrics
     seed_metrics = [
-        compute_ewl_metrics(val_dataset, probs)
+        compute_ewl_metrics(val_dataset, probs, y_hard=y_val_hard)
         for probs in res["probs_per_seed"]
     ]
-    print(f"  {'tau':>4}  {'EW_mean (mean±std)':>20}  {'EW_med (mean±std)':>20}  "
-          f"{'FPR (mean±std)':>18}")
-    print(f"  {'─'*4}  {'─'*20}  {'─'*20}  {'─'*18}")
+    print(f"  {'tau':>4}  {'EWL_med (mean±std)':>20}  "
+          f"{'Traj-FPR (mean±std)':>22}  {'Turn-FPR (mean±std)':>22}")
+    print(f"  {'─'*4}  {'─'*20}  {'─'*22}  {'─'*22}")
     for tau in TAU_SWEEP:
-        ew_means = [sm[tau]["ew_mean"] for sm in seed_metrics]
-        ew_meds  = [sm[tau]["ew_med"]  for sm in seed_metrics]
-        fprs     = [sm[tau]["fpr"]     for sm in seed_metrics]
-        # nan-safe
-        ew_means_clean = [x for x in ew_means if not np.isnan(x)]
-        ew_meds_clean  = [x for x in ew_meds  if not np.isnan(x)]
-        m_mean = f"{np.mean(ew_means_clean):+.2f}±{np.std(ew_means_clean):.2f}" if ew_means_clean else "nan"
-        m_med  = f"{np.mean(ew_meds_clean):+.2f}±{np.std(ew_meds_clean):.2f}"  if ew_meds_clean  else "nan"
-        m_fpr  = f"{np.mean(fprs):.3f}±{np.std(fprs):.3f}"
-        print(f"  {tau:4.1f}  {m_mean:>20}  {m_med:>20}  {m_fpr:>18}")
+        ew_meds    = [sm[tau]["ew_med"]    for sm in seed_metrics]
+        traj_fprs  = [sm[tau]["traj_fpr"]  for sm in seed_metrics]
+        turn_fprs  = [sm[tau]["turn_fpr"]  for sm in seed_metrics]
+        ew_meds_clean = [x for x in ew_meds if not np.isnan(x)]
+        m_med      = (f"{np.mean(ew_meds_clean):+.2f}±{np.std(ew_meds_clean):.2f}"
+                      if ew_meds_clean else "nan")
+        m_traj_fpr = f"{np.mean(traj_fprs):.3f}±{np.std(traj_fprs):.3f}"
+        m_turn_fpr = f"{np.mean(turn_fprs):.3f}±{np.std(turn_fprs):.3f}"
+        print(f"  {tau:4.1f}  {m_med:>20}  {m_traj_fpr:>22}  {m_turn_fpr:>22}")
 
 
 # ─────────────────────────────────────────────────────────────────────
