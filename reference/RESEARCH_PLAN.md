@@ -2033,6 +2033,58 @@ The ~28% of turns where intervention triggers switch from temp=0.7 (focused) to 
 
 Option 1 is preferred: single backend eliminates the class of bugs entirely.
 
+**Status:** Option 1 applied in V-1.8 — both plain and hooked paths now use NNSight with `repetition_penalty=1.2`. However, +9.3pp ASR remains (see §8.1.5).
+
+### 8.1.5 Remaining Root Cause: `generator.invoke()` vs `model.generate(prompt)` (V-1.8)
+
+**After the §8.1.4 sampling fix, alpha=0 still shows ASR = 50.5% (+9.3pp).** The sampling mismatch accounted for ~4pp; the remaining ~9pp comes from a different NNSight code pattern.
+
+**The two NNSight generation patterns:**
+
+| Pattern | Code | Used by |
+|---------|------|---------|
+| **Single-prompt** | `model.generate(prompt, max_new_tokens=...) as generator:` | Phase 1 `target_generate()`, Phase 5 `_plain_target_generate()` |
+| **Multi-invoke** | `model.generate(max_new_tokens=...) as generator:` + `generator.invoke(prompt):` | Phase 5 hooked path (intervention turns) |
+
+Phase 5's hooked path uses the multi-invoke pattern even though we only have a single prompt per generation call.
+
+**How they differ internally (from NNSight source and docs):**
+
+- **`model.generate(prompt, ...)`** — prompt is passed as `*args` to `__nnsight_generate__()` → directly to `self._model.generate(prompt, ...)`. HuggingFace tokenizes and processes the prompt normally. Hooks still work inside the `with` block.
+
+- **`model.generate(...) + generator.invoke(prompt)`** — no prompt is passed to HF's `generate()` initially. `invoke(prompt)` creates an `Invoker` that tokenizes the prompt separately and feeds it through NNSight's **interleaver system**. Designed for multi-prompt batching: you can call `invoke()` multiple times with different prompts. The interleaver coordinates execution across invocations.
+
+From NNSight docs: *"When using multiple invokes with generate, do not pass input to generate() — pass it to the first invoke."*
+
+**Why this matters:** The interleaver machinery changes how the prompt flows through the model. Even with zero corrections (alpha=0), the invoke pattern produces different generation behavior — confirmed by:
+
+| Experiment | Pattern | ASR | Delta from baseline |
+|-----------|---------|-----|-------------------|
+| Phase 1 baseline | `model.generate(prompt)` | 41.2% | — |
+| Phase 5 tau=999 (plain only) | `model.generate(prompt)` | 42.5% | +1.3pp (noise) |
+| Phase 5 alpha=0 (NNSight fix) | mixed: plain=`generate(prompt)`, hooked=`invoke(prompt)` | 50.5% | **+9.3pp** |
+
+The hooked path's `invoke()` is the sole remaining cause of the ASR increase.
+
+**Fix:** Replace the multi-invoke pattern with single-prompt pattern in the hooked path. Hooks work without `invoke()`:
+
+```python
+# BEFORE (multi-invoke pattern — causes +9.3pp ASR):
+with model.generate(max_new_tokens=..., repetition_penalty=1.2, remote=REMOTE) as generator:
+    with generator.invoke(prompt):
+        for layer in sorted_layers:
+            model.model.language_model.layers[layer].output[0][:, -1] += corrections[layer]
+        tokens = model.generator.output.save()
+
+# AFTER (single-prompt pattern — matches Phase 1):
+with model.generate(prompt, max_new_tokens=..., repetition_penalty=1.2, remote=REMOTE) as generator:
+    for layer in sorted_layers:
+        model.model.language_model.layers[layer].output[0][:, -1] += corrections[layer]
+    tokens = model.generator.output.save()
+```
+
+This matches Phase 1's `target_generate()` exactly, with the addition of layer correction hooks.
+
 ### 8.2 Intervention Feature Set Ablation
 
 The current plan intervenes on 131 causal drivers (subset of 435 EN features). We should ablate whether expanding the intervention surface improves ASR reduction.
