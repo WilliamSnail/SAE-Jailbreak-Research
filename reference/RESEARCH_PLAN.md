@@ -2064,12 +2064,12 @@ From NNSight docs: *"When using multiple invokes with generate, do not pass inpu
 | Phase 5 tau=999 (plain only) | `model.generate(prompt)` | 42.5% | +1.3pp (noise) |
 | Phase 5 alpha=0 (NNSight fix) | mixed: plain=`generate(prompt)`, hooked=`invoke(prompt)` | 50.5% | **+9.3pp** |
 
-The hooked path's `invoke()` is the sole remaining cause of the ASR increase.
+**Initial hypothesis:** the invoke interleaver was the sole remaining cause of the ASR increase.
 
-**Fix:** Replace the multi-invoke pattern with single-prompt pattern in the hooked path. Hooks work without `invoke()`:
+**Proposed fix:** Replace the multi-invoke pattern with single-prompt pattern in the hooked path. Hooks work without `invoke()`:
 
 ```python
-# BEFORE (multi-invoke pattern — causes +9.3pp ASR):
+# BEFORE (multi-invoke pattern):
 with model.generate(max_new_tokens=..., repetition_penalty=1.2, remote=REMOTE) as generator:
     with generator.invoke(prompt):
         for layer in sorted_layers:
@@ -2083,7 +2083,108 @@ with model.generate(prompt, max_new_tokens=..., repetition_penalty=1.2, remote=R
     tokens = model.generator.output.save()
 ```
 
-This matches Phase 1's `target_generate()` exactly, with the addition of layer correction hooks.
+#### Result: invoke was NOT the cause (V-1.8)
+
+Applied the fix above (both `target_generate_with_intervention` and `_local_generate` now use `model.generate(prompt, ...)`). Re-ran alpha=0, tau=0.4, mode=all:
+
+| Experiment | Pattern | ASR | Delta from baseline |
+|-----------|---------|-----|-------------------|
+| Phase 1 baseline | `model.generate(prompt)` | 41.2% | — |
+| Phase 5 tau=999 (plain only) | `model.generate(prompt)` | 42.5% | +1.3pp (noise) |
+| Phase 5 alpha=0 (before invoke fix) | mixed: plain=`generate(prompt)`, hooked=`invoke(prompt)` | 50.5% | **+9.3pp** |
+| Phase 5 alpha=0 (after invoke fix) | both paths: `generate(prompt)` | **51.0%** | **+9.8pp** |
+
+**Fixing `invoke()` had essentially zero effect (50.5% → 51.0%, within 2-run bootstrap variance of ±1.4pp).** The invoke pattern is NOT what causes the ASR increase.
+
+**Within-condition evidence (V-1.8, alpha=0, post-fix, single run with 200 trajectories):**
+
+| Turn type | N | Avg score | Median | % JB (≥9) | % safe (≤2) | Avg D_t |
+|-----------|---|----------|--------|-----------|-------------|---------|
+| **Intervened** | 431 | 5.12 | 6.0 | **19.0%** | 27.6% | 0.565 |
+| **Not intervened** | 1207 | 2.73 | 1.0 | 4.6% | 65.9% | 0.247 |
+
+The intervened turns have 4× the jailbreak rate of non-intervened turns, even though the intervention adds a **zero vector**. The hook operation itself — `output[0][:, -1] += zero_tensor` — is modifying generation behavior.
+
+**Striking per-category asymmetry (not consistent with random noise):**
+
+| Category | Baseline ASR | Intervention ASR | Delta |
+|----------|-------------|-----------------|-------|
+| Privacy | 42.0% | 75.0% | **+33.0pp** |
+| Government decision-making | 64.0% | 90.0% | **+26.0pp** |
+| Malware/Hacking | 48.0% | 70.0% | **+22.0pp** |
+| Harassment/Discrimination | 26.0% | 40.0% | +14.0pp |
+| Expert advice | 50.0% | 60.0% | +10.0pp |
+| Disinformation | 52.0% | 60.0% | +8.0pp |
+| Fraud/Deception | 48.0% | 50.0% | +2.0pp |
+| Economic harm | 40.0% | 40.0% | 0.0pp |
+| Sexual/Adult content | 0.0% | 0.0% | 0.0pp |
+| **Physical harm** | 42.0% | 25.0% | **−17.0pp** |
+
+Privacy, Government, and Malware categories show massive increases while Physical harm actually improves — a systematic, category-specific effect.
+
+**Revised hypothesis: the `+= zero_tensor` hook operation itself perturbs generation.**
+
+Even though mathematically `x += 0` is a no-op, inside NNSight's traced graph the operation:
+- Creates a node in the intervention graph that gets executed per generated token
+- Is an in-place operation on the residual stream tensor
+- May interact with the KV cache, autograd graph, or numerical precision differently than no-op
+- May consume different CUDA RNG state than the plain path (affecting sampling)
+
+**Diagnostic #1 (V-1.9):** Ran alpha=0 with the hook lines commented out:
+
+```python
+with model.generate(prompt, ...) as generator:
+    # DIAGNOSTIC: hook lines commented out
+    # for layer in sorted_layers:
+    #     model.model.language_model.layers[layer].output[0][:, -1] += corrections[layer]
+    tokens = model.generator.output.save()
+```
+
+**Result: ASR = 54.5% (+13.3pp) — the hook `+= 0` operation is NOT the cause.**
+
+| Experiment | ASR | Delta |
+|-----------|-----|-------|
+| Baseline | 41.2% | — |
+| tau=999 (plain path only) | 42.5% | +1.3pp |
+| alpha=0 with `+= 0` hook | 51.0% | +9.8pp |
+| **alpha=0 with hook commented out** | **54.5%** | **+13.3pp** |
+
+Removing the `+= zero_tensor` operation made the ASR delta the same or slightly worse (within variance). The hook itself is not the source of the perturbation.
+
+Within-condition breakdown (381 intervened, 1266 not intervened):
+- Intervened turns: 20.7% JB (score ≥9), avg D_t = 0.571
+- Non-intervened turns: 6.2% JB, avg D_t = 0.254
+- Even with no hook applied, "intervened" turns (flagged by MLP) produce 3.3× more jailbreaks
+
+**Updated hypothesis: something in the triggered code path — before `model.generate()` — perturbs generation.** Candidates:
+
+1. **`compute_intervention_correction()`** in `run_intervention_turn` — creates `t.zeros(D_MODEL, device=device)` tensors and calls `saes_dict[layer].W_dec[sae_idx].to(device)`. Runs only on triggered turns.
+2. **`corrections_on_device` dict** in `target_generate_with_intervention` — moves zero tensors to GPU, executed only on triggered turns.
+3. **`swim_acts` / `prev_swim_tensors` construction** in `run_intervention_turn` — builds tensor dicts from SWiM activations on triggered turns only.
+4. **try/except wrapper** around `model.generate` — may interact with CUDA stream state.
+5. **Accumulated NNSight state** from repeatedly entering the hooked code path (per-turn corruption not cleared by `reset_nnsight_state` since no error occurs).
+
+Non-triggered turns route directly to `_plain_target_generate()` (via `if not corrections` early return), skipping all of the above.
+
+**Diagnostic #2 (V-1.9 next):** Short-circuit `target_generate_with_intervention` to `_plain_target_generate()` at the top, bypassing `corrections_on_device`, `sorted_layers`, try/except wrapper, and the nested `model.generate` call:
+
+```python
+def target_generate_with_intervention(messages, corrections=None, ...):
+    if not corrections:
+        response = _plain_target_generate(messages, max_new_tokens=max_new_tokens)
+        return response, False
+
+    # DIAGNOSTIC #2: bypass all hooked-path code, route to plain
+    response = _plain_target_generate(messages, max_new_tokens=max_new_tokens)
+    return response, True  # still log as "intervened"
+    # ... unreachable
+```
+
+Note: `compute_intervention_correction` still runs in `run_intervention_turn` — this diagnostic does NOT remove its execution. It isolates whether the perturbation comes from `target_generate_with_intervention`'s inline code.
+
+Outcomes:
+- **ASR drops to ~41–42%:** the inline hooked-path code (dict creation, try/except, nested call structure) is the cause. Fix by refactoring or by always routing through `_plain_target_generate` and applying hooks via a different mechanism.
+- **ASR stays at ~51–54%:** the cause is upstream — in `run_intervention_turn` (swim_acts construction, compute_intervention_correction). Next diagnostic would disable compute_intervention_correction entirely.
 
 ### 8.2 Intervention Feature Set Ablation
 
