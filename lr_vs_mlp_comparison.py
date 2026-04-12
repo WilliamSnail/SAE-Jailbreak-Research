@@ -440,6 +440,23 @@ for v_name, res in variant_results.items():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# EWL: Logistic Regression baseline
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("EWL — Logistic Regression baseline")
+print("="*60)
+
+lr_ewl_metrics = compute_ewl_metrics(val_dataset, lr_probs, y_hard=y_val_hard)
+print_ewl_table(lr_ewl_metrics)
+
+print(f"\n  {'tau':>4}  {'EWL_med':>10}  {'Traj-FPR':>10}  {'Turn-FPR':>10}")
+print(f"  {'─'*4}  {'─'*10}  {'─'*10}  {'─'*10}")
+for tau in TAU_SWEEP:
+    m = lr_ewl_metrics[tau]
+    print(f"  {tau:4.1f}  {m['ew_med']:+10.2f}  {m['traj_fpr']:10.3f}  {m['turn_fpr']:10.3f}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # FPR breakdown at tau=0.4 — Standard+Soft seed=42 (for reference)
 # ─────────────────────────────────────────────────────────────────────
 print(f"\n" + "="*60)
