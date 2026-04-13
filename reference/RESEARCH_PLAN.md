@@ -957,7 +957,7 @@ Zero-out ablation experiments on all 2,135 turns (1,023 jailbroken, 1,112 refuse
 - **F_H dominates detection** — F_H-only (B) actually *beats* baseline; F_S-only (C) is below random
 - **Data-driven F_H (B, 0.706) > Old layer-based F_H (F, 0.699)** — data-driven split is more informative
 - Old F_S (G, 0.665) was decent because 153/233 old-F_S features are actually escalating (misclassified F_H)
-- **180 causal drivers retain 96.9% of AUC** — efficient subset for intervention
+- **180 causal drivers retain 96.9% of AUC** — efficient subset for intervention (Phase 4 / 435-feature MLP; **final thesis result**: 122 causal drivers from EN 459-feature set retain 84.8% of full-model AUC, 0.784 vs 0.924)
 
 **Note on turn-level AUC = 0.69 vs Phase 3 trajectory-level AUC = 0.96:** The ablation uses per-turn binary labels inherited from the trajectory label. Early turns in jailbroken trajectories are correctly predicted as low-risk by the MLP but labeled as "jailbroken" here, deflating AUC. Relative comparisons remain valid.
 
@@ -2609,7 +2609,7 @@ The refusal direction is a **blunt on/off switch** for refusal behavior. Our met
 - [x] **14.0–14.4:** Setup, config, trajectory statistics, model loading, feature extraction (with saved-data toggle)
 - [x] **14.5: Feature drift analysis** — Pearson correlation on 435 features: 309 F_H, 3 F_S, 123 neutral at θ=0.10. Layer-based heuristic was wrong (153/233 old-F_S are actually escalating)
 - [x] **14.6: Threshold sweep + MLP gradient attribution** — sweep θ ∈ [0.05, 0.30]; gradient×input attribution identified 180 causal drivers; feature #10 (layer 17, SAE 963) dominates at 3× next
-- [x] **14.7: Feature group ablation** — F_H-only AUC=0.706 beats baseline 0.694; F_S-only AUC=0.479 (below random); data-driven > layer-based split; 180 causal drivers retain 96.9% AUC
+- [x] **14.7: Feature group ablation** — F_H-only AUC=0.706 beats baseline 0.694; F_S-only AUC=0.479 (below random); data-driven > layer-based split; 180 causal drivers retain 96.9% AUC (**final thesis**: 122 causal drivers from EN 459-feature set, AUC=0.784 vs full model 0.924 = 84.8% retention)
 - [x] **14.8: Full d_sae drift analysis** — 19,728 F_S features exist in full 524K space (F_H:F_S = 1.7:1). Elastic Net filtered out nearly all F_S.
 - [x] **14.9: Balanced feature re-selection** — selected top-200 F_H + top-200 F_S from full d_sae by |corr|
 - [x] **14.10: Retrain MLP on balanced features** — **NEGATIVE RESULT:** balanced MLP AUC=0.606 (near random) vs old MLP AUC=0.982. Drift-correlated F_S features are not discriminative. Elastic Net selection was correct, not biased. Proceed with original MLP + F_H suppression (Scenario B).
