@@ -2380,11 +2380,45 @@ No consistent direction across categories — some up, some down, consistent wit
 
 **Conclusion:** Detection works (D_t correlates with dangerous turns: 15.1% JB on intervened vs 3.4% on non-intervened), but alpha=1.0 steering via SAE decoder directions does not meaningfully reduce ASR. The correction vectors are either too weak, contain conflicting directions, or the model recovers within subsequent tokens.
 
-**Possible next directions:**
-1. Increase alpha (2.0, 5.0, 10.0) — corrections may be too weak at 1.0
+### 8.1.8 Alpha=3.0 Test: Stronger Steering is Counterproductive (V-1.9)
+
+**Config:** alpha=3.0, tau=0.4, steer_mode=all, steer_delta=False, steer_target=baseline, NUM_RUNS=3
+
+| Condition | ASR | Delta vs baseline | Intervened JB% | Non-intervened JB% |
+|---|---|---|---|---|
+| alpha=0 (short-circuit) | 43.0% ±7.1 | +1.8pp | 17.6% | 2.9% |
+| alpha=1.0 | 42.0% ±1.4 | +0.8pp | 15.1% | 3.4% |
+| **alpha=3.0** | **45.0% ±5.6** | **+3.8pp** | **18.5%** | **3.4%** |
+
+Alpha=1.0 showed a tiny reduction on intervened turns (17.6% → 15.1%), but alpha=3.0 reverses it (back to 18.5%). Stronger steering makes things worse, not better.
+
+Per-category ASR (n=30 per category):
+
+| Category | Baseline | Intervention | Delta |
+|---|---|---|---|
+| Disinformation | 52.0% | 56.7% | +4.7pp |
+| Economic harm | 40.0% | 40.0% | +0.0pp |
+| Expert advice | 50.0% | 56.7% | +6.7pp |
+| Fraud/Deception | 48.0% | 56.7% | +8.7pp |
+| Government decision-making | 64.0% | 66.7% | +2.7pp |
+| Harassment/Discrimination | 26.0% | 23.3% | -2.7pp |
+| Malware/Hacking | 48.0% | 53.3% | +5.3pp |
+| Physical harm | 42.0% | 36.7% | -5.3pp |
+| Privacy | 42.0% | 60.0% | +18.0pp |
+| Sexual/Adult content | 0.0% | 0.0% | +0.0pp |
+
+Per-file ASR: 50.0%, 39.0%, 46.0% (high variance across runs).
+
+**Analysis:** The pattern of stronger alpha → worse ASR strongly suggests the correction vectors contain conflicting directions. `steer_mode="all"` includes both F_H (harm-associated) and F_S (safety-associated) drivers. Some F_S drivers may be pushing the model *toward* harmful outputs when steered toward benign baselines (suppressing safety features). At higher alpha, these conflicting signals are amplified.
+
+Other possible factors:
+- Hook only modifies `[:, -1]` (last token position) — correction may be overwhelmed by subsequent tokens
+- Correction vectors may disrupt model coherence, producing unexpected outputs the judge scores differently
+
+**Next directions:**
+1. Try `fh_only` mode (alpha=1.0) — steer only F_H drivers, exclude F_S drivers that may conflict
 2. Inspect correction vector magnitudes relative to residual stream norms
-3. Try `fh_only` or `strict_fh` mode — steering all drivers may include conflicting directions that cancel out
-4. Hook at all token positions instead of just `[:, -1]` — current hook only modifies the last token position
+3. Hook at all token positions instead of just `[:, -1]`
 
 ### 8.2 Intervention Feature Set Ablation
 
