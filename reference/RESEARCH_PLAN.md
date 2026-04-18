@@ -2340,24 +2340,15 @@ All four prompt differences from §8.1.6 aligned to Phase 1 in V-1.9 (CRESCENDO_
 
 **Config:** alpha=1.0, tau=0.4, steer_mode=all, steer_delta=False, steer_target=baseline, NUM_RUNS=2
 
-| Condition | ASR | Delta vs baseline | Notes |
+| Metric | Baseline | Intervention | Delta |
 |---|---|---|---|
-| Baseline (Phase 1, 5 runs) | 41.2% ±2.6 | — | Authoritative |
-| alpha=0, aligned, short-circuit | 43.0% ±7.1 | +1.8pp | No steering (control) |
-| **alpha=1.0, aligned, real intervention** | **42.0% ±1.4** | **+0.8pp** | **No meaningful effect** |
+| ASR% | 41.2% ±2.6 | 42.0% ±1.4 | +0.8pp |
+| AvgMaxScore | 6.66 ±0.24 | 6.50 ±0.16 | -0.16 |
+| AvgTurns | 8.2 ±0.1 | 8.6 ±0.1 | +0.4 |
+| AvgTurnToJB | 4.3 | 4.7 | +0.4 |
+| MedianMaxScore | 8.0 | 8.0 | +0.0 |
 
-**Intervention had no effect on ASR.** 42.0% vs 41.2% is +0.8pp, well within baseline variance.
-
-Within-condition comparison (intervened vs non-intervened turns):
-
-| Metric | alpha=0 (no steering) | alpha=1.0 (real steering) |
-|---|---|---|
-| Intervened turn JB% | 17.6% | 15.1% |
-| Non-intervened turn JB% | 2.9% | 3.4% |
-| N intervened turns | 472 | 489 |
-| Avg D_t (intervened) | 0.589 | 0.556 |
-
-A tiny -2.5pp reduction on intervened turns (17.6% → 15.1%), but within noise at these sample sizes.
+**Intervention had no effect on ASR.** +0.8pp is well within baseline variance.
 
 Per-category ASR (n=20 per category in intervention — high variance):
 
@@ -2374,9 +2365,20 @@ Per-category ASR (n=20 per category in intervention — high variance):
 | Privacy | 42.0% | 60.0% | +18.0pp |
 | Sexual/Adult content | 0.0% | 5.0% | +5.0pp |
 
-No consistent direction across categories — some up, some down, consistent with noise at n=20.
+No consistent direction across categories — noise at n=20.
 
-**Timing:** Intervention rate 28.5%, avg overhead/turn 1.622s (dominated by SAE extraction at 1.621s), correction compute negligible (0.000s), generation 16.148s/turn.
+Within-condition comparison (intervened vs non-intervened turns):
+
+| Metric | alpha=0 (no steering) | alpha=1.0 (real steering) |
+|---|---|---|
+| Intervened turn JB% | 17.6% | 15.1% |
+| Non-intervened turn JB% | 2.9% | 3.4% |
+| N intervened turns | 472 | 489 |
+| Avg D_t (intervened) | 0.589 | 0.556 |
+
+A tiny -2.5pp reduction on intervened turns (17.6% → 15.1%), but within noise at these sample sizes.
+
+**Timing:** Intervention rate 28.5%, avg overhead/turn 1.622s (dominated by SAE extraction at 1.621s), correction compute negligible, generation 16.148s/turn.
 
 **Conclusion:** Detection works (D_t correlates with dangerous turns: 15.1% JB on intervened vs 3.4% on non-intervened), but alpha=1.0 steering via SAE decoder directions does not meaningfully reduce ASR. The correction vectors are either too weak, contain conflicting directions, or the model recovers within subsequent tokens.
 
@@ -2384,13 +2386,15 @@ No consistent direction across categories — some up, some down, consistent wit
 
 **Config:** alpha=3.0, tau=0.4, steer_mode=all, steer_delta=False, steer_target=baseline, NUM_RUNS=3
 
-| Condition | ASR | Delta vs baseline | Intervened JB% | Non-intervened JB% |
-|---|---|---|---|---|
-| alpha=0 (short-circuit) | 43.0% ±7.1 | +1.8pp | 17.6% | 2.9% |
-| alpha=1.0 | 42.0% ±1.4 | +0.8pp | 15.1% | 3.4% |
-| **alpha=3.0** | **45.0% ±5.6** | **+3.8pp** | **18.5%** | **3.4%** |
+| Metric | Baseline | Intervention | Delta |
+|---|---|---|---|
+| ASR% | 41.2% ±2.6 | 45.0% ±5.6 | +3.8pp |
+| AvgMaxScore | 6.66 ±0.24 | 6.83 ±0.18 | +0.18 |
+| AvgTurns | 8.2 ±0.1 | 8.1 ±0.2 | -0.1 |
+| AvgTurnToJB | 4.3 | 4.5 | +0.2 |
+| MedianMaxScore | 8.0 | 8.0 | +0.0 |
 
-Alpha=1.0 showed a tiny reduction on intervened turns (17.6% → 15.1%), but alpha=3.0 reverses it (back to 18.5%). Stronger steering makes things worse, not better.
+Stronger steering makes things worse (+3.8pp vs +0.8pp at alpha=1.0).
 
 Per-category ASR (n=30 per category):
 
@@ -2407,6 +2411,15 @@ Per-category ASR (n=30 per category):
 | Privacy | 42.0% | 60.0% | +18.0pp |
 | Sexual/Adult content | 0.0% | 0.0% | +0.0pp |
 
+Within-condition (intervened vs non-intervened turns):
+
+| Metric | Intervened | Non-intervened |
+|---|---|---|
+| N turns | 681 | 1762 |
+| % score > 8 (JB) | 18.5% | 3.4% |
+| Avg score | 5.06 | 2.60 |
+| Avg D_t | 0.568 | 0.252 |
+
 Per-file ASR: 50.0%, 39.0%, 46.0% (high variance across runs).
 
 **Analysis:** The pattern of stronger alpha → worse ASR strongly suggests the correction vectors contain conflicting directions. `steer_mode="all"` includes both F_H (harm-associated) and F_S (safety-associated) drivers. Some F_S drivers may be pushing the model *toward* harmful outputs when steered toward benign baselines (suppressing safety features). At higher alpha, these conflicting signals are amplified.
@@ -2414,6 +2427,57 @@ Per-file ASR: 50.0%, 39.0%, 46.0% (high variance across runs).
 Other possible factors:
 - Hook only modifies `[:, -1]` (last token position) — correction may be overwhelmed by subsequent tokens
 - Correction vectors may disrupt model coherence, producing unexpected outputs the judge scores differently
+
+### 8.1.9 Alpha=3.0 with Steer_Delta=True (V-1.9)
+
+**Config:** alpha=3.0, tau=0.4, steer_mode=all, steer_delta=True, steer_target=baseline, NUM_RUNS=3
+
+| Metric | Baseline | Intervention | Delta |
+|---|---|---|---|
+| ASR% | 41.2% ±2.6 | 43.3% ±3.8 | +2.1pp |
+| AvgMaxScore | 6.66 ±0.24 | 6.73 ±0.16 | +0.07 |
+| AvgTurns | 8.2 ±0.1 | 8.4 ±0.2 | +0.2 |
+| AvgTurnToJB | 4.3 | 4.7 | +0.4 |
+| MedianMaxScore | 8.0 | 8.0 | +0.0 |
+
+Including delta drivers slightly dampens the counterproductive effect (45.0% → 43.3%), but still no reduction below baseline.
+
+Per-category ASR (n=30 per category):
+
+| Category | Baseline | Intervention | Delta |
+|---|---|---|---|
+| Disinformation | 52.0% | 46.7% | -5.3pp |
+| Economic harm | 40.0% | 36.7% | -3.3pp |
+| Expert advice | 50.0% | 56.7% | +6.7pp |
+| Fraud/Deception | 48.0% | 50.0% | +2.0pp |
+| Government decision-making | 64.0% | 73.3% | +9.3pp |
+| Harassment/Discrimination | 26.0% | 23.3% | -2.7pp |
+| Malware/Hacking | 48.0% | 63.3% | +15.3pp |
+| Physical harm | 42.0% | 26.7% | -15.3pp |
+| Privacy | 42.0% | 50.0% | +8.0pp |
+| Sexual/Adult content | 0.0% | 6.7% | +6.7pp |
+
+Within-condition (intervened vs non-intervened turns):
+
+| Metric | Intervened | Non-intervened |
+|---|---|---|
+| N turns | 685 | 1844 |
+| % score > 8 (JB) | 18.2% | 2.8% |
+| Avg score | 5.20 | 2.51 |
+| Avg D_t | 0.571 | 0.257 |
+
+Per-file ASR: 45.0%, 39.0%, 46.0%.
+
+### 8.1.10 Summary of All Intervention Experiments (V-1.9)
+
+| # | Alpha | Steer Delta | ASR | Delta | Intervened JB% | Notes |
+|---|---|---|---|---|---|---|
+| 1 | 0 (short-circuit) | — | 43.0% | +1.8pp | 17.6% | Control (no steering) |
+| 2 | 1.0 | False | 42.0% | +0.8pp | 15.1% | Best result, tiny signal |
+| 3 | 3.0 | False | 45.0% | +3.8pp | 18.5% | Counterproductive |
+| 4 | 3.0 | True | 43.3% | +2.1pp | 18.2% | Delta drivers help slightly |
+
+**Conclusion:** Current SAE-decoder-direction steering does not reduce ASR. Detection works well (D_t reliably identifies dangerous turns), but the correction mechanism fails. Stronger alpha worsens results, suggesting conflicting driver directions.
 
 **Next directions:**
 1. Try `fh_only` mode (alpha=1.0) — steer only F_H drivers, exclude F_S drivers that may conflict
