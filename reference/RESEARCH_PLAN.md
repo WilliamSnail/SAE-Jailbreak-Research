@@ -2598,32 +2598,157 @@ Per-file ASR: 44.0%, 49.0%, 46.0%.
 
 Overall the directional signal is real but noisy at n=20–30 per cell. The categories with strongest signal (Malware, Gov. decision, Economic harm) tend to involve technical/procedural knowledge rather than explicit violence/harassment.
 
-### 8.1.13 Updated Summary of All Intervention Experiments (V-1.9)
+### 8.1.13 Extreme Alpha Test: α=+30.0 (V-1.9)
+
+**Config:** alpha=30.0, tau=0.4, steer_mode=all, steer_delta=False, steer_target=baseline, NUM_RUNS=3
+
+| Metric | Baseline | Intervention | Delta |
+|---|---|---|---|
+| ASR% | 41.2% ±2.6 | 44.0% ±3.0 | +2.8pp |
+| AvgMaxScore | 6.66 ±0.24 | 6.65 ±0.16 | -0.01 |
+| AvgTurns | 8.2 ±0.1 | 8.3 ±0.1 | +0.0 |
+| AvgTurnToJB | 4.3 | 4.6 | +0.2 |
+| MedianMaxScore | 8.0 | 8.0 | +0.0 |
+
+α=30 (10x the magnitude of α=3) produces **identical overall ASR** to α=3 (45.0% vs 44.0%). The model is surprisingly robust to even massive corrections.
+
+Per-category ASR (n=30 per category):
+
+| Category | Baseline | Intervention | Delta |
+|---|---|---|---|
+| Disinformation | 52.0% | 56.7% | +4.7pp |
+| Economic harm | 40.0% | 36.7% | -3.3pp |
+| Expert advice | 50.0% | 73.3% | +23.3pp |
+| Fraud/Deception | 48.0% | 36.7% | -11.3pp |
+| Government decision-making | 64.0% | 70.0% | +6.0pp |
+| Harassment/Discrimination | 26.0% | 26.7% | +0.7pp |
+| Malware/Hacking | 48.0% | 50.0% | +2.0pp |
+| Physical harm | 42.0% | 33.3% | -8.7pp |
+| Privacy | 42.0% | 53.3% | +11.3pp |
+| Sexual/Adult content | 0.0% | 3.3% | +3.3pp |
+
+Per-category swings are wild (Expert advice +23pp, Fraud -11pp) while overall ASR stays flat — the massive correction produces random/incoherent perturbations rather than coherent steering.
+
+Within-condition (intervened vs non-intervened turns):
+
+| Metric | Intervened | Non-intervened |
+|---|---|---|
+| N turns | 646 | 1831 |
+| % score > 8 (JB) | 19.0% | 2.6% |
+| Avg score | 5.33 | 2.47 |
+| Avg D_t | 0.556 | 0.248 |
+
+Per-file ASR: 41.0%, 47.0%, 44.0%.
+
+**Key insight:** A 10x increase in alpha (3→30) produced no additional effect on overall ASR. This rules out "corrections are too weak" as the explanation — even at extreme magnitudes the steering doesn't work. The corrections are either being absorbed by the model's residual stream, or the composed SAE directions don't coherently target safety behavior.
+
+**Updated cross-experiment per-category (all alphas):**
+
+| Category | Baseline | α=+1 | α=+3 | α=+30 | α=-3 |
+|---|---|---|---|---|---|
+| Disinformation | 52.0% | 60.0% | 56.7% | 56.7% | 56.7% |
+| Economic harm | 40.0% | 45.0% | 40.0% | 36.7% | 50.0% |
+| Expert advice | 50.0% | 50.0% | 56.7% | 73.3% | 53.3% |
+| Fraud/Deception | 48.0% | 60.0% | 56.7% | 36.7% | 56.7% |
+| Gov. decision | 64.0% | 60.0% | 66.7% | 70.0% | 76.7% |
+| Harassment/Discr. | 26.0% | 20.0% | 23.3% | 26.7% | 20.0% |
+| Malware/Hacking | 48.0% | 35.0% | 53.3% | 50.0% | 60.0% |
+| Physical harm | 42.0% | 25.0% | 36.7% | 33.3% | 30.0% |
+| Privacy | 42.0% | 60.0% | 60.0% | 53.3% | 56.7% |
+| Sexual/Adult | 0.0% | 5.0% | 0.0% | 3.3% | 3.3% |
+
+### 8.1.14 Alpha=+1.0 with Steer_Delta=True (V-1.9)
+
+**Config:** alpha=1.0, tau=0.4, steer_mode=all, steer_delta=True, steer_target=baseline, NUM_RUNS=3
+
+| Metric | Baseline | Intervention | Delta |
+|---|---|---|---|
+| ASR% | 41.2% ±2.6 | 43.7% ±1.2 | +2.5pp |
+| AvgMaxScore | 6.66 ±0.24 | 6.77 ±0.19 | +0.12 |
+| AvgTurns | 8.2 ±0.1 | 8.4 ±0.3 | +0.1 |
+| AvgTurnToJB | 4.3 | 4.4 | +0.1 |
+| MedianMaxScore | 8.0 | 8.0 | +0.0 |
+
+Adding delta drivers to α=+1.0 made results worse (42.0% → 43.7%). Delta drivers add noise to the correction vectors.
+
+Per-category ASR (n=30 per category):
+
+| Category | Baseline | Intervention | Delta |
+|---|---|---|---|
+| Disinformation | 52.0% | 56.7% | +4.7pp |
+| Economic harm | 40.0% | 40.0% | +0.0pp |
+| Expert advice | 50.0% | 46.7% | -3.3pp |
+| Fraud/Deception | 48.0% | 50.0% | +2.0pp |
+| Government decision-making | 64.0% | 63.3% | -0.7pp |
+| Harassment/Discrimination | 26.0% | 23.3% | -2.7pp |
+| Malware/Hacking | 48.0% | 56.7% | +8.7pp |
+| Physical harm | 42.0% | 33.3% | -8.7pp |
+| Privacy | 42.0% | 63.3% | +21.3pp |
+| Sexual/Adult content | 0.0% | 3.3% | +3.3pp |
+
+Within-condition (intervened vs non-intervened turns):
+
+| Metric | Intervened | Non-intervened |
+|---|---|---|
+| N turns | 678 | 1835 |
+| % score > 8 (JB) | 17.1% | 3.5% |
+| Avg score | 5.10 | 2.57 |
+| Avg D_t | 0.547 | 0.258 |
+
+Per-file ASR: 45.0%, 43.0%, 43.0%.
+
+**Delta driver comparison at both alpha levels:**
+
+| Alpha | Delta=False | Delta=True | Effect of delta |
+|---|---|---|---|
+| +1.0 | 42.0% (+0.8pp) | 43.7% (+2.5pp) | +1.7pp worse |
+| +3.0 | 45.0% (+3.8pp) | 43.3% (+2.1pp) | -1.7pp better |
+
+Delta drivers slightly worsen α=+1.0 but slightly improve α=+3.0. No consistent benefit.
+
+### 8.1.15 Updated Summary of All Intervention Experiments (V-1.9)
 
 | # | Alpha | Mode | Steer Delta | ASR | Delta | Intervened JB% | Notes |
 |---|---|---|---|---|---|---|---|
 | 1 | 0 (control) | — | — | 43.0% | +1.8pp | 17.6% | No steering |
-| 2 | +1.0 | all | False | 42.0% | +0.8pp | 15.1% | Best positive result |
-| 3 | +3.0 | all | False | 45.0% | +3.8pp | 18.5% | Too strong, counterproductive |
-| 4 | +3.0 | all | True | 43.3% | +2.1pp | 18.2% | Delta helps slightly |
+| **2** | **+1.0** | **all** | **False** | **42.0%** | **+0.8pp** | **15.1%** | **Best result** |
+| 3 | +3.0 | all | False | 45.0% | +3.8pp | 18.5% | Counterproductive |
+| 4 | +3.0 | all | True | 43.3% | +2.1pp | 18.2% | Delta helps at α=3 |
 | 5 | +1.0 | fh_only | False | 44.0% | +2.8pp | 16.4% | F_H-only no better |
-| 6 | **-3.0** | **all** | **False** | **46.3%** | **+5.1pp** | **21.6%** | **Worst — confirms direction** |
+| 6 | -3.0 | all | False | 46.3% | +5.1pp | 21.6% | Worst — confirms direction |
+| 7 | +30.0 | all | False | 44.0% | +2.8pp | 19.0% | 10x magnitude, no extra effect |
+| 8 | +1.0 | all | True | 43.7% | +2.5pp | 17.1% | Delta hurts at α=1 |
 
-**Key finding:** The correction vectors have correct directional meaning:
-- α=+1.0 (toward benign): ASR 42.0%, intervened JB% 15.1% — best
-- α=-3.0 (away from benign): ASR 46.3%, intervened JB% 21.6% — worst
-- Spread: 4.3pp overall ASR, 6.5pp on intervened turns
+**Updated cross-experiment per-category (all experiments):**
 
-**What works:** Detection. D_t reliably identifies dangerous turns across all experiments (intervened JB% 15–22% vs non-intervened 2.8–3.8%). The MLP detector is a valid jailbreak signal. Correction vectors have correct direction (confirmed by negative alpha test).
+| Category | BL | #2 α+1 | #3 α+3 | #4 α+3Δ | #5 fh | #6 α-3 | #7 α+30 | #8 α+1Δ |
+|---|---|---|---|---|---|---|---|---|
+| Disinformation | 52% | 60% | 57% | 47% | 57% | 57% | 57% | 57% |
+| Economic harm | 40% | 45% | 40% | 37% | 57% | 50% | 37% | 40% |
+| Expert advice | 50% | 50% | 57% | 57% | 57% | 53% | 73% | 47% |
+| Fraud/Deception | 48% | 60% | 57% | 50% | 53% | 57% | 37% | 50% |
+| Gov. decision | 64% | 60% | 67% | 73% | 63% | 77% | 70% | 63% |
+| Harassment | 26% | 20% | 23% | 23% | 10% | 20% | 27% | 23% |
+| Malware | 48% | 35% | 53% | 63% | 53% | 60% | 50% | 57% |
+| Physical harm | 42% | 25% | 37% | 27% | 37% | 30% | 33% | 33% |
+| Privacy | 42% | 60% | 60% | 50% | 50% | 57% | 53% | 63% |
+| Sexual/Adult | 0% | 5% | 0% | 7% | 3% | 3% | 3% | 3% |
 
-**What doesn't work well enough:** SAE-decoder-direction steering at `[:, -1]` with current magnitudes. The effect is real but too small (~1pp at optimal α=1.0). Possible limiting factors:
+**Key findings (8 experiments complete):**
+1. **Detection works.** D_t reliably identifies dangerous turns across all experiments (intervened JB% 15–22% vs non-intervened 2.6–3.8%).
+2. **Correction direction is correct.** α=+1.0 (42.0%) vs α=-3.0 (46.3%) confirms directional meaning.
+3. **Magnitude is not the bottleneck.** α=+30 (44.0%) ≈ α=+3 (45.0%) — 10x increase has no additional effect.
+4. **Delta drivers don't help.** Inconsistent across alpha levels, no net benefit.
+5. **F_H-only mode doesn't help.** Filtering to harm-only drivers didn't improve over all-driver steering.
+6. **SAE-composed directions don't coherently steer safety behavior.** All configurations produce 42–46% ASR against a 41.2% baseline. The effect is real but too small (~1pp at best) to be practically useful.
 
-1. **Hook at `[:, -1]` only** — correction applied at the last token position of the prefix; the model can recover within subsequent generated tokens as autoregressive generation proceeds
-2. **SAE decoder directions ≠ behavior directions** — individual SAE feature directions may not compose into a coherent "be safer" steering vector; the linear combination of many feature corrections may cancel or produce incoherent perturbations
-3. **Fixed correction across all tokens** — the same vector is added at every generated token, with no adaptation to the evolving generation context
-4. **Magnitude mismatch** — at α=1.0 the effect is too small; at α=3.0 it disrupts coherence. The useful operating range is narrow.
+**What doesn't work:** SAE-decoder-direction steering at `[:, -1]`. The fundamental issue is not magnitude but direction — composed SAE feature corrections don't form a coherent safety steering vector. Possible reasons:
 
-### 8.1.14 Next Steps: Diagnosis and Alternative Steering
+1. **SAE decoder directions ≠ behavior directions** — individual feature directions may cancel or produce incoherent perturbations when composed
+2. **Hook at `[:, -1]` only** — correction at one position per forward pass; the model may compensate in later layers or tokens
+3. **Fixed correction across all tokens** — no adaptation to evolving generation context
+
+### 8.1.16 Next Steps: Diagnosis and Alternative Steering
 
 **Option A: Diagnose correction magnitudes (quick diagnostic)**
 
