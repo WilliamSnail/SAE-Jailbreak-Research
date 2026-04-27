@@ -28,30 +28,39 @@ JB_THRESHOLD  = 8   # score >= JB_THRESHOLD → jailbroken turn
 BASE = Path(__file__).parent / "results" / "intervention_trajectories"
 
 FILE_GROUPS = {
-    "Alpha=1 | steer_all | delta=F": [
+    "Alpha=-3 | steer_all | delta=F": [
+        BASE / "Alpha_-3_steer_all_delta_false_baseline" / "intervention_tau0.4_20260421_041215.json",
+        BASE / "Alpha_-3_steer_all_delta_false_baseline" / "intervention_tau0.4_20260421_093302.json",
+        BASE / "Alpha_-3_steer_all_delta_false_baseline" / "intervention_tau0.4_20260421_145407.json",
+    ],
+    "Alpha=1  | steer_all | delta=F": [
         BASE / "Alpha_1_steer_all_delta_false_baseline" / "intervention_tau0.4_20260413_122315.json",
         BASE / "Alpha_1_steer_all_delta_false_baseline" / "intervention_tau0.4_20260413_180725.json",
     ],
-    "Alpha=3 | steer_all | delta=F": [
+    "Alpha=1  | steer_all | delta=T": [
+        BASE / "Alpha_1_steer_all_delta_true_baseline" / "intervention_tau0.4_20260423_084853.json",
+        BASE / "Alpha_1_steer_all_delta_true_baseline" / "intervention_tau0.4_20260426_095128.json",
+        BASE / "Alpha_1_steer_all_delta_true_baseline" / "intervention_tau0.4_20260426_152504.json",
+    ],
+    "Alpha=3  | steer_all | delta=F": [
         BASE / "Alpha_3_steer_all_delta_false_baseline" / "intervention_tau0.4_20260414_064242.json",
         BASE / "Alpha_3_steer_all_delta_false_baseline" / "intervention_tau0.4_20260414_121258.json",
         BASE / "Alpha_3_steer_all_delta_false_baseline" / "intervention_tau0.4_20260415_035742.json",
     ],
-    "Alpha=3 | steer_all | delta=T": [
+    "Alpha=3  | steer_all | delta=T": [
         BASE / "Alpha_3_steer_all_delta_true_baseline" / "intervention_tau0.4_20260415_133110.json",
         BASE / "Alpha_3_steer_all_delta_true_baseline" / "intervention_tau0.4_20260415_191205.json",
         BASE / "Alpha_3_steer_all_delta_true_baseline" / "intervention_tau0.4_20260416_004436.json",
     ],
-    "Alpha=3 | steer_FH  | delta=F": [
+    "Alpha=3  | steer_FH  | delta=F": [
         BASE / "Alpha_3_steer_F_H_only_delta_false_baseline" / "intervention_tau0.4_20260419_043206.json",
         BASE / "Alpha_3_steer_F_H_only_delta_false_baseline" / "intervention_tau0.4_20260419_095649.json",
         BASE / "Alpha_3_steer_F_H_only_delta_false_baseline" / "intervention_tau0.4_20260419_151445.json",
     ],
-    "New (root, Apr21-22)": [
-        BASE / "intervention_tau0.4_20260421_041215.json",
-        BASE / "intervention_tau0.4_20260421_093302.json",
-        BASE / "intervention_tau0.4_20260421_145407.json",
-        BASE / "intervention_tau0.4_20260422_033151.json",
+    "Alpha=30 | steer_all | delta=F": [
+        BASE / "Alpha_30_steer_all_delta_false_baseline" / "intervention_tau0.4_20260422_033151.json",
+        BASE / "Alpha_30_steer_all_delta_false_baseline" / "intervention_tau0.4_20260422_084547.json",
+        BASE / "Alpha_30_steer_all_delta_false_baseline" / "intervention_tau0.4_20260422_140201.json",
     ],
 }
 

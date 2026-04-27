@@ -2748,7 +2748,35 @@ Delta drivers slightly worsen α=+1.0 but slightly improve α=+3.0. No consisten
 2. **Hook at `[:, -1]` only** — correction at one position per forward pass; the model may compensate in later layers or tokens
 3. **Fixed correction across all tokens** — no adaptation to evolving generation context
 
-### 8.1.16 Next Steps: Diagnosis and Alternative Steering
+### 8.1.16 EWL and Detection Timing Across All Intervention Experiments (intervention_ewl_analysis.py)
+
+Computed from `intervention_ewl_analysis.py` (TAU=0.4, JB_THRESHOLD>=8, trajectory-level).
+
+| Config | N | ASR | TP | FP | FN | TN | Traj-FPR | Score@Det | EWL mean | EWL med | nEWL |
+| ------ | - | --- | -- | -- | -- | -- | -------- | --------- | -------- | ------- | ---- |
+| α=−3 \| steer_all \| Δ=F | 300 | 0.527 | 130 | 61 | 28 | 81 | 0.430 | 4.81 | +1.02 | +1.0 | 130 |
+| α=+1 \| steer_all \| Δ=F | 200 | 0.510 | 89 | 40 | 13 | 58 | 0.408 | 4.57 | +1.46 | +1.0 | 89 |
+| α=+1 \| steer_all \| Δ=T | 300 | 0.530 | 125 | 72 | 34 | 69 | 0.511 | 5.07 | +1.30 | +1.0 | 125 |
+| α=+3 \| steer_all \| Δ=F | 300 | 0.523 | 131 | 70 | 26 | 73 | 0.490 | 5.08 | +1.02 | +1.0 | 131 |
+| α=+3 \| steer_all \| Δ=T | 300 | 0.537 | 134 | 65 | 27 | 74 | 0.468 | 5.17 | +1.39 | +1.0 | 134 |
+| α=+3 \| steer_FH  \| Δ=F | 300 | 0.540 | 134 | 66 | 28 | 72 | 0.478 | 4.71 | +1.20 | +1.0 | 134 |
+| α=+30\| steer_all \| Δ=F | 300 | 0.540 | 131 | 65 | 31 | 73 | 0.471 | 4.81 | +1.50 | +1.0 | 131 |
+
+**Key findings:**
+1. **EWL median = +1.0 turn** uniformly across all 7 configurations — the detector consistently fires one turn before the jailbreak, regardless of steering config or alpha magnitude.
+2. **Score at detection ≈ 4.6–5.2** — detector triggers at mid-escalation, ~3 points below the jailbreak threshold of 8. The intervention is applied before harmful output is imminent.
+3. **EWL is stable under intervention** — neither positive (α=+1, +3, +30) nor negative (α=−3) steering shifts when the detector fires. Detection timing is independent of the correction applied.
+
+**EWL value distributions (TP only):**
+- α=−3 | steer_all | Δ=F: `[(-3,1),(-2,5),(-1,16),(0,38),(1,26),(2,22),(3,9),(4,8),(5,2),(6,1),(8,1),(9,1)]`
+- α=+1 | steer_all | Δ=F: `[(-5,1),(-4,2),(-3,1),(-2,1),(-1,10),(0,21),(1,14),(2,13),(3,10),(4,6),(5,2),(6,4),(7,2),(8,2)]`
+- α=+1 | steer_all | Δ=T: `[(-2,1),(-1,14),(0,41),(1,25),(2,12),(3,18),(4,2),(5,6),(6,5),(8,1)]`
+- α=+3 | steer_all | Δ=F: `[(-5,2),(-4,2),(-3,1),(-2,2),(-1,14),(0,42),(1,24),(2,21),(3,10),(4,4),(5,2),(7,5),(8,2)]`
+- α=+3 | steer_all | Δ=T: `[(-3,3),(-1,12),(0,42),(1,25),(2,20),(3,12),(4,8),(5,5),(6,3),(7,1),(8,3)]`
+- α=+3 | steer_FH  | Δ=F: `[(-5,1),(-4,2),(-2,2),(-1,16),(0,35),(1,25),(2,24),(3,14),(4,6),(5,5),(7,2),(8,2)]`
+- α=+30| steer_all | Δ=F: `[(-2,1),(-1,12),(0,40),(1,22),(2,21),(3,15),(4,7),(5,7),(6,3),(7,3)]`
+
+### 8.1.17 Next Steps: Diagnosis and Alternative Steering
 
 **Option A: Diagnose correction magnitudes (quick diagnostic)**
 
