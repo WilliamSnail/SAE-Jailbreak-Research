@@ -1,6 +1,6 @@
 # Thesis and workshop paper (2026)
 
-The code and results behind two pieces of writing, kept exactly as they were:
+The code and results behind two pieces of writing, kept as they were when cited (the differences are listed below):
 
 | Writing | Where | Notes |
 |---|---|---|
@@ -8,7 +8,12 @@ The code and results behind two pieces of writing, kept exactly as they were:
 | Paper for the ICML 2026 Mechanistic Interpretability Workshop, *Early Detection of Multi-Turn Jailbreak Escalation via Cross-Layer SAE Feature Drift*. Non-archival: available only on [OpenReview](https://openreview.net/forum?id=MpdfElbiwL) (submitted 30 Apr 2026; last modified 11 Jun 2026) | this folder | a revised version of the thesis paper, written at about the same time; **same code and same results** |
 
 Nothing here was changed in the reorganisation except the folder location.
-One later change is on `main` only: commit `b0086bf` (2026-04-26, made after the commit the thesis cites, `8a49456`) moved some result files into the subfolders described under *`results/` in detail* below. In the tag `thesis-final-2026-05` those files are at the paths the thesis uses (for example `results/intervention_trajectories_tau999/` instead of `results/intervention_diagnoses/intervention_trajectories_tau999/`).
+Two commits made after the commit the thesis cites (`8a49456`) are on `main` only:
+
+- `b0086bf` (2026-04-26) moved some result files into the subfolders described under *`results/` in detail* below, updated `intervention_ewl_analysis.py` to read them (it now covers all seven steering settings), and added section 8.1.16 to `reference/RESEARCH_PLAN.md`.
+- `0d5730d` added an aggregate-statistics section to `intervention_ewl_analysis.py`.
+
+Every other file, including each result file, is identical to the tagged state. In the tag `thesis-final-2026-05` the moved files are at the paths the thesis uses (for example `results/intervention_trajectories_tau999/` instead of `results/intervention_diagnoses/intervention_trajectories_tau999/`).
 New work after the thesis goes in [`../journal/`](../journal/).
 
 ## Cited by the thesis and the workshop paper
